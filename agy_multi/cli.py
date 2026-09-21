@@ -236,9 +236,7 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
         label = u.get("label", "● 可用")
         if code == "READY":
             usability_str = f"{GREEN}{label}{RESET}"
-        elif code == "CLAUDE_EXHAUSTED":
-            usability_str = f"{YELLOW}{label}{RESET}"
-        elif code == "COOLDOWN_5H":
+        elif code in ("LOW_WEEKLY", "CLAUDE_EXHAUSTED", "COOLDOWN_5H"):
             usability_str = f"{YELLOW}{label}{RESET}"
         elif code == "WEEKLY_EXHAUSTED":
             usability_str = f"{RED}{label}{RESET}"
@@ -373,7 +371,7 @@ def cmd_relay(manager: ProfileManager, args: argparse.Namespace, remaining_args:
         best_name = best_cand["name"] if best_cand else None
 
         profiles = manager.list_profiles()
-        headers = ["ID", "Name", "Target Email", "Status", "Gemini Wk Rem", "Gemini 5H Rem", "Claude Wk Rem", "PIDs", "Relay Suitability"]
+        headers = ["ID", "Name", "Target Email", "Status", "Gemini 5H Rem", "Gemini Wk Rem", "Claude Wk Rem", "PIDs", "Relay Suitability"]
         rows = []
         for p in profiles:
             if src_profile and p["name"] == src_profile["name"]:
@@ -407,8 +405,8 @@ def cmd_relay(manager: ProfileManager, args: argparse.Namespace, remaining_args:
                 suitability = f"{RED}✗ Ineligible ({reason}){RESET}"
             elif g_5h_pct <= min_buffer and min_buffer > 0:
                 suitability = f"{YELLOW}⏳ Reserved (5H <= {min_buffer}%){RESET}"
-            elif u_code == "READY":
-                suitability = f"{GREEN}✓ Ready{RESET}"
+            elif u_code in ("READY", "LOW_WEEKLY"):
+                suitability = f"{GREEN}✓ Ready{RESET}" if u_code == "READY" else f"{YELLOW}⚠ Ready (Weekly low){RESET}"
             elif u_code == "COOLDOWN_5H":
                 suitability = f"{YELLOW}⏳ Cooldown (Gemini 5H low){RESET}"
             elif u_code == "CLAUDE_EXHAUSTED":
@@ -421,8 +419,8 @@ def cmd_relay(manager: ProfileManager, args: argparse.Namespace, remaining_args:
                 p["name"],
                 p["email"],
                 f"{GREEN}● Logged In{RESET}",
-                g_wk_str,
                 g_5h_str,
+                g_wk_str,
                 c_wk_str,
                 pids_str,
                 suitability

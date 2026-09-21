@@ -656,12 +656,22 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
         target_ineligible_reason = f"5小时配额不足 10% ({g_5h_rem:.1f}%)"
     elif (g_wk and g_wk.get("remainingFraction", 1.0) < 1.0) or (g_5h and g_5h.get("remainingFraction", 1.0) < 1.0):
         g_rem_wk = g_wk.get("remainingPct", 100) if g_wk else 100.0
+        is_low_weekly = bool(g_wk and g_rem_wk < 20.0)
+        is_low_5h = bool(g_5h and g_5h_rem < 20.0)
+        is_warning = is_low_weekly or is_low_5h
+
+        code = "LOW_WEEKLY" if is_low_weekly else "READY"
+        badge_class = "status-warning" if is_warning else "status-ready"
+        label = f"● 可用 (5H: {g_5h_rem:.1f}% | 周: {g_rem_wk:.1f}%)"
+        reason = f"Gemini 5小时剩余 {g_5h_rem:.1f}%, 周度剩余 {g_rem_wk:.1f}%"
+        if is_low_weekly:
+            reason += " (周配额告急预警)"
         usability = {
-            "code": "READY",
-            "label": f"● 可用 (周: {g_rem_wk:.1f}% | 5H: {g_5h_rem:.1f}%)",
-            "badge_class": "status-ready",
+            "code": code,
+            "label": label,
+            "badge_class": badge_class,
             "is_usable": True,
-            "reason": f"Gemini 周度剩余 {g_rem_wk:.1f}%, 5小时剩余 {g_5h_rem:.1f}%",
+            "reason": reason,
         }
         is_target_eligible = True
         target_ineligible_reason = ""
@@ -1246,10 +1256,11 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       border: 1px solid rgba(244, 63, 94, 0.35);
     }}
 
+    .status-tag.status-warning,
     .status-tag.status-pending {{
       background: rgba(245, 158, 11, 0.15);
       color: #fbbf24;
-      border: 1px solid rgba(245, 158, 11, 0.3);
+      border: 1px solid rgba(245, 158, 11, 0.35);
     }}
 
     .status-tag.status-not-auth {{
@@ -1402,10 +1413,77 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       border-color: rgba(16, 185, 129, 0.2);
     }}
 
-    .countdown-time {{
-      font-weight: 700;
-      color: var(--accent-cyan);
+    /* Unified High-Density Quota Meter */
+    .quota-meter {{
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 0.65rem;
+    }}
+
+    .quota-meter:last-child {{
+      margin-bottom: 0;
+    }}
+
+    .quota-meter-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.4rem;
+      margin-bottom: 0.3rem;
+    }}
+
+    .quota-meter-title {{
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #cbd5e1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+
+    .quota-meter-meta {{
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      flex-shrink: 0;
+    }}
+
+    .quota-cd-pill {{
+      font-size: 0.6875rem;
+      padding: 0.12rem 0.42rem;
+      border-radius: 4px;
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      color: #38bdf8;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
       font-family: 'JetBrains Mono', monospace;
+      line-height: 1.25;
+      cursor: help;
+    }}
+
+    .quota-cd-pill.ready {{
+      background: rgba(16, 185, 129, 0.08);
+      border-color: rgba(16, 185, 129, 0.22);
+      color: #34d399;
+    }}
+
+    .quota-cd-pill.disabled {{
+      background: rgba(244, 63, 94, 0.1);
+      border-color: rgba(244, 63, 94, 0.25);
+      color: #fb7185;
+    }}
+
+    .quota-cd-pill.warning {{
+      background: rgba(245, 158, 11, 0.1);
+      border-color: rgba(245, 158, 11, 0.25);
+      color: #fbbf24;
+    }}
+
+    .quota-cd-pill strong {{
+      font-size: 0.6875rem;
     }}
 
     /* Sparkline Bar Chart */
@@ -2399,6 +2477,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         ready5h: "✅ 5小时配额:",
         readyWk: "✅ 周度配额:",
         ready100: "100% 满额可用",
+        ready100Short: "满额",
         pendingAuth: "待认证",
         disabledStatus: "已停用",
         disabledWeeklyLimit: "周配额耗尽，5H限额停用",
@@ -2557,6 +2636,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         ready5h: "✅ 5-Hour Quota:",
         readyWk: "✅ Weekly Quota:",
         ready100: "100% Available",
+        ready100Short: "Full",
         pendingAuth: "Pending Auth",
         disabledStatus: "Disabled",
         disabledWeeklyLimit: "Weekly limit reached, 5H disabled",
@@ -2850,15 +2930,64 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           if (is5hDisabled) statusLabel = t('disabledStatus');
           else statusLabel = `${{t('statusCooldown')}} (${{g5h ? g5h.remainingPct : 0}}%)`;
         }}
-        else if (usability.code === 'READY') {{
+        else if (usability.code === 'READY' || usability.code === 'LOW_WEEKLY') {{
           const g5hRem = g5h ? g5h.remainingPct : 100;
           const gWkRem = gWk ? gWk.remainingPct : 100;
+          const wkLabel = t('labelWeekly') || '周';
           if (gWkRem < 100 || g5hRem < 100) {{
-            statusLabel = `${{t('statusReady')}} (${{t('labelWeekly') || '周'}}: ${{gWkRem}}% | 5H: ${{g5hRem}}%)`;
+            statusLabel = `${{t('statusReady')}} (5H: ${{g5hRem}}% | ${{wkLabel}}: ${{gWkRem}}%)`;
           }} else {{
             statusLabel = t('statusReady100');
           }}
         }}
+
+        let badgeClass = usability.badge_class || 'status-ready';
+        const g5hRemCheck = g5h ? g5h.remainingPct : 100;
+        const gWkRemCheck = gWk ? gWk.remainingPct : 100;
+        if (usability.code === 'LOW_WEEKLY' || ((usability.code === 'READY') && (gWkRemCheck < 20 || g5hRemCheck < 20))) {{
+          badgeClass = 'status-warning';
+        }}
+
+        // 5H Countdown Pill HTML
+        const cd5hPillHtml = is5hDisabled ? `
+          <span class="quota-cd-pill disabled" title="${{g5h ? (g5h.description || t('disabledWeeklyLimit')) : t('disabledWeeklyLimit')}}">
+            <span>🚫</span> <span>${{t('disabledStatus')}}</span>
+          </span>
+        ` : (g5h && g5h.resetTs && pct5h < 100 ? `
+          <span class="quota-cd-pill countdown" title="${{t('exactReleaseTime')}}${{formatExactTime(g5h.resetTs)}}${{t('localTimeSuffix')}}">
+            <span>⏳</span> <strong class="countdown-time mono" data-reset-ts="${{g5h.resetTs || 0}}">...</strong>
+          </span>
+        ` : `
+          <span class="quota-cd-pill ready" title="${{oq.available ? t('ready100') : t('pendingAuth')}}">
+            <span style="color:var(--accent-green)">✓</span> <span class="mono" style="color:var(--accent-green)">${{oq.available ? t('ready100Short') : t('pendingAuth')}}</span>
+          </span>
+        `);
+
+        // Weekly Countdown Pill HTML
+        const cdWkPillHtml = (gWk && gWk.resetTs && pctWk < 100) ? `
+          <span class="quota-cd-pill countdown" title="${{t('exactReleaseTime')}}${{formatExactTime(gWk.resetTs)}}${{t('localTimeSuffix')}}">
+            <span>⏳</span> <strong class="countdown-time mono" data-reset-ts="${{gWk.resetTs || 0}}">...</strong>
+          </span>
+        ` : `
+          <span class="quota-cd-pill ready" title="${{oq.available ? t('ready100') : t('pendingAuth')}}">
+            <span style="color:var(--accent-green)">✓</span> <span class="mono" style="color:var(--accent-green)">${{oq.available ? t('ready100Short') : t('pendingAuth')}}</span>
+          </span>
+        `;
+
+        // Claude & GPT Countdown Pill HTML
+        const cdClaudePillHtml = isClaudeExhausted ? `
+          <span class="quota-cd-pill disabled" title="${{t('exactReleaseTime')}}${{formatExactTime(cWk.resetTs)}}${{t('localTimeSuffix')}}">
+            <span>⏳</span> <strong class="countdown-time mono" style="color:#fb7185" data-reset-ts="${{cWk.resetTs || 0}}">...</strong>
+          </span>
+        ` : (!isClaudeExhausted && cWk && cWk.resetTs && pctClaudeWk < 100 ? `
+          <span class="quota-cd-pill countdown" title="${{t('exactReleaseTime')}}${{formatExactTime(cWk.resetTs)}}${{t('localTimeSuffix')}}">
+            <span>⏳</span> <strong class="countdown-time mono" data-reset-ts="${{cWk.resetTs || 0}}">...</strong>
+          </span>
+        ` : `
+          <span class="quota-cd-pill ready" title="${{oq.available ? t('claude100') : t('needLogin')}}">
+            <span style="color:${{oq.available ? 'var(--accent-green)' : 'var(--text-muted)'}}">✓</span> <span class="mono" style="color:${{oq.available ? 'var(--accent-green)' : 'var(--text-muted)'}}">${{oq.available ? t('ready100Short') : t('needLogin')}}</span>
+          </span>
+        `);
 
         // PID label localization
         let pidText = t('pidIdle');
@@ -2902,99 +3031,63 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             </div>
           </div>
           <div class="acc-status-row">
-            <span class="status-tag ${{usability.badge_class || 'status-ready'}}" title="${{usability.reason || ''}}">${{statusLabel}}</span>
+            <span class="status-tag ${{badgeClass}}" title="${{usability.reason || ''}}">${{statusLabel}}</span>
           </div>
 
           <!-- Official Quota: Gemini Models -->
           <div class="metric-block">
-            <div style="font-size:0.75rem;font-weight:700;color:var(--accent-blue);margin-bottom:0.75rem;display:flex;align-items:center;justify-content:space-between">
+            <div style="font-size:0.75rem;font-weight:700;color:var(--accent-blue);margin-bottom:0.65rem;display:flex;align-items:center;justify-content:space-between">
               <span>${{t('gModelsTitle')}}</span>
               <span style="font-size:0.6875rem;color:var(--text-muted)">${{t('officialQuota')}}</span>
             </div>
 
-            <!-- Gemini Weekly Limit Remaining -->
-            <div class="metric-row" style="margin-bottom:0.25rem">
-              <span class="metric-title" style="font-size:0.75rem">${{t('limitWkRem')}}</span>
-              <span class="progress-pct ${{pctWkClass}}" title="Gemini Weekly: ${{pctWk}}%">${{pctWk}}%</span>
+            <!-- 1. Gemini 5H Limit Remaining (OFFICIAL ORDER: 5H FIRST) -->
+            <div class="quota-meter" style="margin-bottom:0.65rem">
+              <div class="quota-meter-header">
+                <span class="quota-meter-title">${{t('limit5hRem')}}</span>
+                <div class="quota-meter-meta">
+                  ${{cd5hPillHtml}}
+                  <span class="progress-pct ${{pct5hClass}}" title="${{is5hDisabled ? (g5h.description || t('disabledWeeklyLimit')) : 'Gemini 5h: ' + pct5h + '%'}}">${{is5hDisabled ? t('disabledStatus') : pct5h + '%'}}</span>
+                </div>
+              </div>
+              <div class="progress-bar-wrapper">
+                <div class="progress-bar ${{bar5hClass}}" style="width: ${{is5hDisabled ? 0 : pct5h}}%"></div>
+              </div>
             </div>
-            <div class="progress-bar-wrapper" style="margin-top:0.25rem;margin-bottom:0.4rem">
-              <div class="progress-bar ${{barWkClass}}" style="width: ${{pctWk}}%"></div>
-            </div>
-            ${{gWk && gWk.resetTs && pctWk < 100 ? `
-            <div class="reset-countdown" style="margin-top:0.35rem;padding:0.35rem 0.55rem;font-size:0.6875rem" title="${{t('exactReleaseTime')}}${{formatExactTime(gWk.resetTs)}}${{t('localTimeSuffix')}}">
-              <span style="color:#94a3b8;display:flex;align-items:center;gap:4px">
-                ${{t('countdownWk')}}
-              </span>
-              <strong class="countdown-time mono" data-reset-ts="${{gWk.resetTs || 0}}">...</strong>
-            </div>
-            ` : `
-            <div class="reset-countdown ready" style="margin-top:0.35rem;padding:0.35rem 0.55rem;font-size:0.6875rem">
-              <span style="color:#94a3b8;display:flex;align-items:center;gap:4px">
-                ${{t('readyWk')}}
-              </span>
-              <strong class="mono" style="color:var(--accent-green)">${{oq.available ? t('ready100') : t('pendingAuth')}}</strong>
-            </div>
-            `}}
 
-            <!-- Gemini 5H Limit Remaining -->
-            <div class="metric-row" style="margin-top:0.75rem;margin-bottom:0.25rem">
-              <span class="metric-title" style="font-size:0.75rem">${{t('limit5hRem')}}</span>
-              <span class="progress-pct ${{pct5hClass}}" title="${{is5hDisabled ? (g5h.description || t('disabledWeeklyLimit')) : 'Gemini 5h: ' + pct5h + '%'}}">${{is5hDisabled ? t('disabledStatus') : pct5h + '%'}}</span>
+            <!-- 2. Gemini Weekly Limit Remaining (OFFICIAL ORDER: WEEKLY SECOND) -->
+            <div class="quota-meter">
+              <div class="quota-meter-header">
+                <span class="quota-meter-title">${{t('limitWkRem')}}</span>
+                <div class="quota-meter-meta">
+                  ${{cdWkPillHtml}}
+                  <span class="progress-pct ${{pctWkClass}}" title="Gemini Weekly: ${{pctWk}}%">${{pctWk}}%</span>
+                </div>
+              </div>
+              <div class="progress-bar-wrapper">
+                <div class="progress-bar ${{barWkClass}}" style="width: ${{pctWk}}%"></div>
+              </div>
             </div>
-            <div class="progress-bar-wrapper" style="margin-top:0.25rem;margin-bottom:0.4rem">
-              <div class="progress-bar ${{bar5hClass}}" style="width: ${{is5hDisabled ? 0 : pct5h}}%"></div>
-            </div>
-            ${{is5hDisabled ? `
-            <div class="reset-countdown" style="margin-top:0.35rem;padding:0.35rem 0.55rem;font-size:0.6875rem;border-color:rgba(244,63,94,0.3);background:rgba(244,63,94,0.08)" title="${{g5h.description || t('disabledWeeklyLimit')}}">
-              <span style="color:#fb7185;font-weight:600;display:flex;align-items:center;gap:4px">
-                ${{t('statusDisabled')}}
-              </span>
-            </div>
-            ` : (g5h && g5h.resetTs && pct5h < 100 ? `
-            <div class="reset-countdown" style="margin-top:0.35rem;padding:0.35rem 0.55rem;font-size:0.6875rem" title="${{t('exactReleaseTime')}}${{formatExactTime(g5h.resetTs)}}${{t('localTimeSuffix')}}">
-              <span style="color:#94a3b8;display:flex;align-items:center;gap:4px">
-                ${{t('countdown5h')}}
-              </span>
-              <strong class="countdown-time mono" data-reset-ts="${{g5h.resetTs || 0}}">...</strong>
-            </div>
-            ` : `
-            <div class="reset-countdown ready" style="margin-top:0.35rem;padding:0.35rem 0.55rem;font-size:0.6875rem">
-              <span style="color:#94a3b8;display:flex;align-items:center;gap:4px">
-                ${{t('ready5h')}}
-              </span>
-              <strong class="mono" style="color:var(--accent-green)">${{oq.available ? t('ready100') : t('pendingAuth')}}</strong>
-            </div>
-            `)}}
           </div>
 
           <!-- Official Quota: Claude & GPT -->
           <div class="metric-block">
-            <div style="font-size:0.75rem;font-weight:700;color:var(--accent-purple);margin-bottom:0.75rem;display:flex;align-items:center;justify-content:space-between">
+            <div style="font-size:0.75rem;font-weight:700;color:var(--accent-purple);margin-bottom:0.65rem;display:flex;align-items:center;justify-content:space-between">
               <span>${{t('claudeTitle')}}</span>
               <span style="font-size:0.6875rem;color:var(--text-muted)">${{t('claudeWk')}}</span>
             </div>
-            <div class="metric-row" style="margin-bottom:0.25rem">
-              <span class="metric-title" style="font-size:0.75rem">${{t('claudeRem')}}</span>
-              <span class="progress-pct ${{isClaudeExhausted ? 'pct-exhausted' : ''}}">${{isClaudeExhausted ? '0.00%' : (cWk ? cWk.remainingPct + '%' : (oq.available ? '100%' : '-'))}}</span>
+            <div class="quota-meter">
+              <div class="quota-meter-header">
+                <span class="quota-meter-title">${{t('claudeRem')}}</span>
+                <div class="quota-meter-meta">
+                  ${{cdClaudePillHtml}}
+                  <span class="progress-pct ${{isClaudeExhausted ? 'pct-exhausted' : ''}}">${{isClaudeExhausted ? '0.00%' : (cWk ? cWk.remainingPct + '%' : (oq.available ? '100%' : '-'))}}</span>
+                </div>
+              </div>
+              <div class="progress-bar-wrapper">
+                <div class="progress-bar ${{isClaudeExhausted ? 'bar-exhausted' : ''}}" style="width: ${{isClaudeExhausted ? 0 : (cWk ? cWk.remainingPct : 100)}}%"></div>
+              </div>
             </div>
-            <div class="progress-bar-wrapper" style="margin-top:0.25rem;margin-bottom:0.4rem">
-              <div class="progress-bar ${{isClaudeExhausted ? 'bar-exhausted' : ''}}" style="width: ${{isClaudeExhausted ? 0 : (cWk ? cWk.remainingPct : 100)}}%"></div>
-            </div>
-            ${{isClaudeExhausted ? `
-            <div class="reset-countdown" style="margin-top:0.35rem;padding:0.35rem 0.55rem;font-size:0.6875rem;border-color:rgba(244,63,94,0.3);background:rgba(244,63,94,0.08)" title="${{t('exactReleaseTime')}}${{formatExactTime(cWk.resetTs)}}${{t('localTimeSuffix')}}">
-              <span style="color:#fb7185;display:flex;align-items:center;gap:4px">
-                ${{t('claudeCd')}}
-              </span>
-              <strong class="countdown-time mono" style="color:#fb7185" data-reset-ts="${{cWk.resetTs || 0}}">...</strong>
-            </div>
-            ` : `
-            <div class="reset-countdown ready" style="margin-top:0.35rem;padding:0.35rem 0.55rem;font-size:0.6875rem">
-              <span style="color:#94a3b8;display:flex;align-items:center;gap:4px">
-                ${{oq.available ? t('claudeQuota') : t('claudeStatus')}}
-              </span>
-              <strong class="mono" style="color:${{oq.available ? 'var(--accent-green)' : 'var(--text-muted)'}}">${{oq.available ? t('claude100') : t('needLogin')}}</strong>
-            </div>
-            `}}
           </div>
 
           <!-- Local Token Stats Block -->
@@ -3784,7 +3877,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         const exactTimeStr = formatExactTime(resetTs);
         const titleText = `${{t('exactReleaseTime')}}${{exactTimeStr}}${{t('localTimeSuffix')}}`;
         el.title = titleText;
-        if (el.parentElement && el.parentElement.classList.contains('reset-countdown')) {{
+        if (el.parentElement && (el.parentElement.classList.contains('quota-cd-pill') || el.parentElement.classList.contains('reset-countdown'))) {{
           el.parentElement.title = titleText;
         }}
         if (diff <= 0) {{

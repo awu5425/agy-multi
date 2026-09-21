@@ -502,6 +502,8 @@ class ProfileManager:
             score = 1000
             if u_code == "READY":
                 score += 500
+            elif u_code == "LOW_WEEKLY":
+                score += 350
             elif u_code == "COOLDOWN_5H":
                 score -= 600
 
