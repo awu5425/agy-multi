@@ -7,3 +7,6 @@ jev-research/
 LOCAL_CONFIG*
 *.bak
 *.backup
+build/
+dist/
+*.egg-info/

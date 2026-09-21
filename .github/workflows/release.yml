@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    name: Build distributions and upload to Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build pytest pytest-asyncio
+          pip install -e .
+
+      - name: Run test suite before packaging
+        run: |
+          pytest -v
+
+      - name: Build wheel and source distributions
+        run: |
+          python -m build
+
+      - name: Upload distribution packages to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release'
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to PyPI (if PYPI_API_TOKEN secret configured)
+        if: env.HAVE_PYPI_TOKEN != ''
+        env:
+          HAVE_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
