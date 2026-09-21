@@ -40,6 +40,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlparse(origin)
             if parsed.hostname in ("localhost", "127.0.0.1", "::1"):
                 return origin
+            if parsed.hostname and (parsed.hostname.startswith("100.") or parsed.hostname.endswith(".ts.net")):
+                return origin
         except Exception:
             pass
         return None
@@ -53,11 +55,19 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Token")
 
     def _check_auth(self) -> bool:
-        # If no auth_token is configured, only allow loopback client
+        # If no auth_token is configured, allow loopback, Tailscale, or trusted networks
         if not self.auth_token:
             client_ip = self.client_address[0]
-            if client_ip in ("127.0.0.1", "::1", "localhost"):
+            if not self.allow_remote or client_ip in ("127.0.0.1", "::1", "localhost"):
                 return True
+            # Allow Tailscale CGNAT range (100.64.0.0/10)
+            if client_ip.startswith("100."):
+                try:
+                    import ipaddress
+                    if ipaddress.ip_address(client_ip) in ipaddress.ip_network("100.64.0.0/10"):
+                        return True
+                except Exception:
+                    pass
             return False
 
         auth_header = self.headers.get("Authorization", "")
@@ -68,6 +78,24 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         api_token_header = self.headers.get("X-API-Token", "").strip()
         if api_token_header and secrets.compare_digest(api_token_header, self.auth_token):
             return True
+
+        # Check URL query parameter: ?token=...
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            q_token = urllib.parse.parse_qs(parsed.query).get("token", [None])[0]
+            if q_token and secrets.compare_digest(q_token, self.auth_token):
+                return True
+        except Exception:
+            pass
+
+        # Check Cookie: agy_token=...
+        cookie_header = self.headers.get("Cookie", "")
+        if cookie_header:
+            for part in cookie_header.split(";"):
+                if "=" in part:
+                    k, v = part.strip().split("=", 1)
+                    if k == "agy_token" and secrets.compare_digest(v, self.auth_token):
+                        return True
         return False
 
     def _requires_read_auth(self) -> bool:
@@ -99,6 +127,17 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
             self._send_unauthorized()
             return
 
+        # If token was supplied via query string, set cookie for subsequent fetch calls
+        set_cookie_header = None
+        if self.auth_token:
+            try:
+                parsed = urllib.parse.urlparse(self.path)
+                q_token = urllib.parse.parse_qs(parsed.query).get("token", [None])[0]
+                if q_token and secrets.compare_digest(q_token, self.auth_token):
+                    set_cookie_header = f"agy_token={q_token}; Path=/; SameSite=Lax"
+            except Exception:
+                pass
+
         clean_path = self.path.split("?", 1)[0]
         if clean_path in ("/", "/index.html", "/dashboard"):
             try:
@@ -110,6 +149,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
                 self.send_header("Pragma", "no-cache")
                 self.send_header("Expires", "0")
+                if set_cookie_header:
+                    self.send_header("Set-Cookie", set_cookie_header)
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
@@ -254,20 +295,37 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
 
-def start_server(host: str = "127.0.0.1", port: int = 8989, token: Optional[str] = None):
+def start_server(
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    token: Optional[str] = None
+):
     load_env_config()
     mgr = ProfileManager()
     UsageDashboardHandler.manager = mgr
 
+    if host is None:
+        host = os.environ.get("AGY_MULTI_SERVER_HOST", "127.0.0.1")
+    if port is None:
+        try:
+            port = int(os.environ.get("AGY_MULTI_SERVER_PORT", "8989"))
+        except (ValueError, TypeError):
+            port = 8989
+
     is_loopback = host in ("127.0.0.1", "localhost", "::1")
-    UsageDashboardHandler.allow_remote = not is_loopback
+    allow_no_auth = os.environ.get("AGY_MULTI_SERVER_NO_AUTH", "").lower() in ("true", "1", "yes")
+
+    UsageDashboardHandler.allow_remote = (not is_loopback) and (not allow_no_auth)
 
     env_token = os.environ.get("AGY_MULTI_SERVER_TOKEN") or token
-    if not env_token and not is_loopback:
+    if allow_no_auth:
+        env_token = None
+        print(f"\n[INFO] Non-loopback binding ({host}) with NO_AUTH enabled (Tailscale / Trusted Network mode).")
+    elif not env_token and not is_loopback:
         env_token = secrets.token_hex(16)
         print(f"\n[SECURITY] Non-loopback binding ({host}). Generated admin token for ALL endpoints (GET/POST/HTML):")
         print(f"  Token: {env_token}")
-        print(f"  Use Header: 'Authorization: Bearer {env_token}' or 'X-API-Token: {env_token}'\n")
+        print(f"  Use Header: 'Authorization: Bearer {env_token}' or 'X-API-Token: {env_token}' or '?token={env_token}' in browser URL\n")
     elif not is_loopback:
         print(f"\n[SECURITY WARNING] Binding to non-loopback host '{host}'.")
         print("  All endpoints require the configured API token.")

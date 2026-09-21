@@ -174,3 +174,19 @@ def test_non_loopback_get_without_token_401(non_loopback_style_server):
     )
     with urllib.request.urlopen(req) as resp:
         assert resp.status == 200
+
+    # Query param ?token=... should also authenticate
+    req_query = urllib.request.Request(
+        f"{non_loopback_style_server}/api/usage?token=lan-token-456"
+    )
+    with urllib.request.urlopen(req_query) as resp:
+        assert resp.status == 200
+
+    # Cookie agy_token=... should also authenticate
+    req_cookie = urllib.request.Request(
+        f"{non_loopback_style_server}/api/usage",
+        headers={"Cookie": "agy_token=lan-token-456; other=123"},
+    )
+    with urllib.request.urlopen(req_cookie) as resp:
+        assert resp.status == 200
+
