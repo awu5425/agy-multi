@@ -99,7 +99,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
             self._send_unauthorized()
             return
 
-        if self.path in ("/", "/index.html", "/dashboard"):
+        clean_path = self.path.split("?", 1)[0]
+        if clean_path in ("/", "/index.html", "/dashboard"):
             try:
                 data = get_all_usage(self.manager)
                 html = render_html_dashboard(data)
