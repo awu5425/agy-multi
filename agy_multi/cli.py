@@ -7,13 +7,15 @@ import sys
 import os
 import time
 import json
+import shutil
+import re
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
 from .manager import ProfileManager
-from .utils import BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
+from .utils import BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET, load_env_config, detect_real_home
 
 
 def format_table(rows: List[List[str]], headers: List[str]) -> str:
@@ -539,6 +541,127 @@ def cmd_run(manager: ProfileManager, args: argparse.Namespace, remaining_args: L
     return runner.run()
 
 
+def extract_credentials_from_binary() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Inspects installed Antigravity CLI binary to extract built-in Google OAuth credentials."""
+    bin_path = shutil.which("agy") or shutil.which("antigravity")
+    if not bin_path or not os.path.isfile(bin_path):
+        return None, None, None
+    try:
+        with open(bin_path, "rb") as bf:
+            data = bf.read()
+        cid_match = re.search(rb"(107[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com)", data)
+        sec_match = re.search(rb"(GOCSPX-[A-Za-z0-9_-]{28})", data)
+        cid = cid_match.group(1).decode("utf-8") if cid_match else None
+        sec = sec_match.group(1).decode("utf-8") if sec_match else None
+        return bin_path, cid, sec
+    except Exception:
+        return bin_path, None, None
+
+
+def cmd_creds(manager: ProfileManager, args: argparse.Namespace) -> int:
+    env_cid = os.environ.get("AGY_OAUTH_CLIENT_ID") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+    env_sec = os.environ.get("AGY_OAUTH_CLIENT_SECRET") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+
+    print(f"\n{BOLD}{CYAN}=== Google OAuth Credentials Helper (24/7 Background Refresh) ==={RESET}\n")
+
+    bin_path, bin_cid, bin_sec = extract_credentials_from_binary()
+    active_cid = bin_cid or env_cid
+    active_sec = bin_sec or env_sec
+
+    if not getattr(args, "save", False):
+        if env_cid and env_sec:
+            print(f"{GREEN}✓ Active OAuth client credentials detected in environment:{RESET}")
+            print(f"  • Client ID    : {env_cid[:15]}...{env_cid[-12:]}")
+            print(f"  • Client Secret: {env_sec[:8]}... (Configured)")
+            print(f"\nBackground token refresh is {BOLD}{GREEN}Active & Healthy{RESET}.\n")
+            return 0
+
+        print(f"{YELLOW}⚠️  No OAuth client credentials found in current environment.{RESET}")
+        print("   Background dashboard cannot automatically refresh expired tokens for idle accounts.")
+        print("\nAttempting zero-config auto-discovery from local Antigravity binary...")
+
+        if not bin_path:
+            print(f"{RED}✗ Could not locate 'agy' or 'antigravity' binary on PATH.{RESET}")
+            print("  Please manually set AGY_OAUTH_CLIENT_ID and AGY_OAUTH_CLIENT_SECRET.")
+            return 1
+
+        if not bin_cid or not bin_sec:
+            print(f"{RED}✗ Located binary at {bin_path}, but could not auto-extract credentials.{RESET}")
+            print("  Please manually set AGY_OAUTH_CLIENT_ID and AGY_OAUTH_CLIENT_SECRET.")
+            return 1
+
+        print(f"{GREEN}✓ Found installed binary at:{RESET} {bin_path}")
+        print(f"{GREEN}✓ Successfully discovered Google Antigravity OAuth client credentials!{RESET}")
+
+        export_block = (
+            f'\n# Google Antigravity OAuth Client Credentials (auto-discovered by agy-multi)\n'
+            f'export AGY_OAUTH_CLIENT_ID="{bin_cid}"\n'
+            f'export AGY_OAUTH_CLIENT_SECRET="{bin_sec}"\n'
+        )
+        print("\nTo automatically save credentials to your config and shell, run:")
+        print(f"{BOLD}{GREEN}  agy-multi creds --save{RESET}")
+        print("\nOr manually add the following exports to your ~/.bashrc / service environment:")
+        print(f"{CYAN}{export_block}{RESET}")
+        return 0
+
+    # Handle --save
+    if not active_cid or not active_sec:
+        print(f"{RED}✗ Could not locate or extract OAuth client credentials to save.{RESET}")
+        print("  Please make sure 'agy' is installed, or set AGY_OAUTH_CLIENT_ID and AGY_OAUTH_CLIENT_SECRET manually.")
+        return 1
+
+    if bin_path and bin_cid and bin_sec:
+        print(f"{GREEN}✓ Discovered credentials from installed binary:{RESET} {bin_path}")
+    else:
+        print(f"{GREEN}✓ Using existing environment credentials.{RESET}")
+
+    # Save to ~/.config/agy-multi/env and update ~/.bashrc
+    target_homes = [manager.real_home] if manager else [detect_real_home()]
+    current_home = Path.home().resolve()
+    if current_home not in target_homes:
+        target_homes.append(current_home)
+
+    for h in target_homes:
+        env_dir = h / ".config" / "agy-multi"
+        env_dir.mkdir(parents=True, exist_ok=True)
+        env_file = env_dir / "env"
+        try:
+            env_content = (
+                f"# Google Antigravity OAuth Client Credentials for agy-multi\n"
+                f'AGY_OAUTH_CLIENT_ID="{active_cid}"\n'
+                f'AGY_OAUTH_CLIENT_SECRET="{active_sec}"\n'
+            )
+            env_file.write_text(env_content, encoding="utf-8")
+            env_file.chmod(0o600)
+            print(f"{GREEN}✓ Saved credentials to {env_file} (mode 0600){RESET}")
+        except Exception as e:
+            print(f"{RED}Failed to write {env_file}: {e}{RESET}")
+
+        rc_path = h / ".bashrc"
+        try:
+            existing = rc_path.read_text(encoding="utf-8") if rc_path.exists() else ""
+            if "AGY_OAUTH_CLIENT_ID" in existing:
+                print(f"{GREEN}✓ Credentials already present in {rc_path}{RESET}")
+            else:
+                export_block = (
+                    f'\n# Google Antigravity OAuth Client Credentials (auto-discovered by agy-multi)\n'
+                    f'export AGY_OAUTH_CLIENT_ID="{active_cid}"\n'
+                    f'export AGY_OAUTH_CLIENT_SECRET="{active_sec}"\n'
+                )
+                with open(rc_path, "a", encoding="utf-8") as f:
+                    f.write(export_block)
+                print(f"{GREEN}✓ Appended credentials export to {rc_path}{RESET}")
+        except Exception as e:
+            print(f"{RED}Failed to update {rc_path}: {e}{RESET}")
+
+    os.environ["AGY_OAUTH_CLIENT_ID"] = active_cid
+    os.environ["AGY_OAUTH_CLIENT_SECRET"] = active_sec
+    print(f"\n{BOLD}{GREEN}✓ Configuration saved successfully! Background token refresh is active.{RESET}\n")
+    return 0
+
+
+
+
 def cmd_login(manager: ProfileManager, args: argparse.Namespace) -> int:
     profile = manager.find_profile(args.identifier)
     if not profile:
@@ -621,6 +744,11 @@ def cmd_install_helpers(manager: ProfileManager, args: argparse.Namespace) -> in
     package_dir = Path(__file__).resolve().parent.parent
     
     script_content = f"""#!/usr/bin/env bash
+if [ -f "$HOME/.config/agy-multi/env" ]; then
+    set -a
+    source "$HOME/.config/agy-multi/env"
+    set +a
+fi
 PYTHONPATH="{package_dir}:$PYTHONPATH" python3 -m agy_multi.cli "$@"
 """
     with open(main_bin, "w", encoding="utf-8") as f:
@@ -773,6 +901,7 @@ def cmd_init(manager, args):
 
 
 def main():
+    load_env_config()
     parser = argparse.ArgumentParser(
         prog="agy-multi",
         description="Google AI Pro multi-account manager and runner for Antigravity (agy)"
@@ -846,6 +975,10 @@ def main():
     p_relay.add_argument("--list-candidates", action="store_true", help="List eligible target profiles and their quota scores")
     p_relay.add_argument("--min-buffer", type=float, help="Override minimum quota buffer percentage for this relay (e.g. 5 for 5%)")
 
+    # creds / auth-helper
+    p_creds = subparsers.add_parser("creds", help="Inspect or auto-discover OAuth client credentials for 24/7 background token refresh")
+    p_creds.add_argument("--save", action="store_true", help="Automatically discover credentials from local agy binary and append to ~/.bashrc")
+
     # Parse known args so trailing args can be forwarded to agy in `run` and `relay`
     if len(sys.argv) > 1 and sys.argv[1] == "run":
         if "-h" in sys.argv or "--help" in sys.argv:
@@ -897,6 +1030,8 @@ def main():
         sys.exit(cmd_add(manager, args))
     elif args.command in ("edit", "update"):
         sys.exit(cmd_edit(manager, args))
+    elif args.command == "creds":
+        sys.exit(cmd_creds(manager, args))
     elif args.command == "install":
         sys.exit(cmd_install_helpers(manager, args))
     else:

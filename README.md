@@ -65,6 +65,19 @@ agy-multi status    # quota, watchdog policy, next relay candidate
 agy-multi serve     # local web dashboard → http://127.0.0.1:8989
 ```
 
+### 4. 24/7 Background token refresh & credential keeper (`agy-multi creds`)
+
+Google OAuth access tokens expire every 60 minutes. When secondary accounts sit idle, expired tokens cause the dashboard to report "Credential expired". `agy-multi` provides an open-source, zero-configuration solution:
+
+```bash
+agy-multi creds           # inspect current OAuth credentials status or test auto-discovery
+agy-multi creds --save    # auto-extract official credentials from local agy binary and save to ~/.config/agy-multi/env & ~/.bashrc
+```
+
+- **Zero GCP setup required**: Automatically reuses official client credentials embedded in your installed Antigravity binary.
+- **Strictly open-source safe**: Zero hardcoded secrets in the git repository; all discovery and config happens locally on the user's host with `0600` permissions.
+- **Universal automatic loading**: CLI commands, runner scripts (`agy-auto`, `agy-1`, etc.), Web dashboard, and systemd services automatically source `~/.config/agy-multi/env` for seamless background token refreshes.
+
 ---
 
 ## How the relay works
@@ -88,7 +101,9 @@ agy-multi serve --port 8989
 agy-multi serve --host 0.0.0.0 --port 8989 --token YOUR_SECURE_TOKEN  # LAN / network
 ```
 
-- **Quota at a glance** — ♊ Gemini 5h + weekly bars with down-to-the-second reset countdowns; 🧠 Claude & GPT weekly bars with exhaustion alerts.
+- **Quota at a glance (official order alignment)** — strictly adheres to official Google Antigravity order: **5-Hour rolling quota first**, followed by **Weekly quota second** with second-precision reset countdowns; 🧠 Claude & GPT weekly bars with exhaustion alerts.
+- **High-density compact layout** — reset countdown pill (`.quota-cd-pill`) is cleanly merged inside the quota meter container (`.quota-meter`), eliminating redundant vertical height.
+- **Low quota warning indicator** — accounts with weekly quota < 20% display a noticeable yellow warning badge (`LOW_WEEKLY`), providing early warning while remaining eligible for relay fallback.
 - **Token analytics** — trend curves with Total / Read·Write·Cache / Thinking·Output views, linear↔log scale, GitHub-style daily calendar with hover breakdowns (Prompt / Thinking / Output / requests).
 - **One-click relay** — hit 🚀 Relay on any session card to move it immediately.
 - **Settings modal** — reserve-buffer slider (0–50%, 0.5% steps), auto-takeover toggle, instant persistence.
@@ -128,6 +143,7 @@ agy-multi relay --list-candidates     # quota scores, 5H status, idle state of t
 agy-multi config                      # view config
 agy-multi config --min-buffer 5       # reserve buffer % (0–50); accounts at/below it trigger handover
 agy-multi config --on-no-target pause # pause (default: exact countdown, auto-wake) | burn_buffer (spend to 429)
+agy-multi creds [--save]          # inspect or auto-discover & save OAuth credentials for 24/7 background refresh
 agy-multi usage [--csv] [--html PATH] [--json]
 ```
 

@@ -29,6 +29,53 @@ SENSITIVE_SKIP_NAMES = {
 }
 
 
+def detect_real_home() -> Path:
+    """Detect real user HOME even when running inside a .gemini-profiles isolation container."""
+    if os.environ.get("AGY_REAL_HOME"):
+        return Path(os.environ["AGY_REAL_HOME"]).resolve()
+    home = Path(os.path.expanduser("~")).resolve()
+    parts = home.parts
+    if ".gemini-profiles" in parts:
+        idx = parts.index(".gemini-profiles")
+        return Path(*parts[:idx])
+    return home
+
+
+def load_env_config(config_file: Optional[Path] = None) -> Dict[str, str]:
+    """Loads key=value pairs from ~/.config/agy-multi/env into os.environ if not already set."""
+    if config_file is None:
+        real_home = detect_real_home()
+        default_file = real_home / ".config" / "agy-multi" / "env"
+        if not default_file.is_file():
+            fallback_file = real_home / ".config" / "agy-multi" / "oauth.env"
+            config_file = fallback_file if fallback_file.is_file() else default_file
+        else:
+            config_file = default_file
+
+    loaded = {}
+
+    if config_file.is_file():
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("export "):
+                        line = line[7:].strip()
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k:
+                            loaded[k] = v
+                            if k not in os.environ:
+                                os.environ[k] = v
+        except Exception:
+            pass
+    return loaded
+
+
 def parse_jwt_payload(token: str) -> Dict[str, Any]:
     """Extracts payload claims from JWT without signature verification (for display purposes)."""
     try:

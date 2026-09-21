@@ -9,6 +9,11 @@ mkdir -p "$LOCAL_BIN"
 # 1. Install main agy-multi wrapper
 cat << EOF > "$LOCAL_BIN/agy-multi"
 #!/usr/bin/env bash
+if [ -f "\$HOME/.config/agy-multi/env" ]; then
+    set -a
+    source "\$HOME/.config/agy-multi/env"
+    set +a
+fi
 SCRIPT_DIR="$SCRIPT_DIR"
 PYTHONPATH="\$SCRIPT_DIR:\$PYTHONPATH" exec python3 -m agy_multi.cli "\$@"
 EOF
@@ -28,4 +33,9 @@ echo "✓ Installed alias: $LOCAL_BIN/gemini-switch -> agy-multi"
 # 2. Run agy-multi install to generate/update shortcuts
 "$LOCAL_BIN/agy-multi" install
 
+# 3. Auto-discover Google Antigravity OAuth client credentials for 24/7 background token refresh
+echo "=== Configuring background token refresh credentials ==="
+"$LOCAL_BIN/agy-multi" creds --save || true
+
 echo "=== agy-multi installation complete! ==="
+

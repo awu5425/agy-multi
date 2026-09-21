@@ -14,11 +14,13 @@ from typing import Optional
 try:
     from .manager import ProfileManager
     from .usage import get_all_usage, get_profile_usage, render_html_dashboard, save_html_dashboard
+    from .utils import load_env_config
 except (ImportError, ValueError):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from agy_multi.manager import ProfileManager
     from agy_multi.usage import get_all_usage, get_profile_usage, render_html_dashboard, save_html_dashboard
+    from agy_multi.utils import load_env_config
 
 
 class UsageDashboardHandler(BaseHTTPRequestHandler):
@@ -252,6 +254,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
 
 
 def start_server(host: str = "127.0.0.1", port: int = 8989, token: Optional[str] = None):
+    load_env_config()
     mgr = ProfileManager()
     UsageDashboardHandler.manager = mgr
 

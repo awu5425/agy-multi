@@ -19,6 +19,7 @@ from .utils import (
     sync_profile_environment,
     inspect_token_file,
     get_profile_active_pids,
+    detect_real_home,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -39,14 +40,8 @@ class ProfileManager:
 
     @staticmethod
     def _detect_real_home() -> Path:
-        if os.environ.get("AGY_REAL_HOME"):
-            return Path(os.environ["AGY_REAL_HOME"]).resolve()
-        home = Path(os.path.expanduser("~")).resolve()
-        parts = home.parts
-        if ".gemini-profiles" in parts:
-            idx = parts.index(".gemini-profiles")
-            return Path(*parts[:idx])
-        return home
+        return detect_real_home()
+
 
     def _ensure_initialized(self) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)

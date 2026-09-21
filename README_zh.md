@@ -65,6 +65,19 @@ agy-multi status    # 查看各账号配额、看门狗策略与下一个接力�
 agy-multi serve     # 本地 Web 看板 → http://127.0.0.1:8989
 ```
 
+### 4. 24/7 后台自动续期与凭证守护 (`agy-multi creds`)
+
+Google OAuth 访问令牌默认有效期为 1 小时。当账号处于空闲静置状态时，Token 到期会导致看板提示“凭证已到期”。`agy-multi` 提供了开箱即用的零配置解决方案：
+
+```bash
+agy-multi creds           # 检查当前凭据状态，或测试从本地 agy 二进制自动提取
+agy-multi creds --save    # 自动提取官方 OAuth 凭据并写入 ~/.config/agy-multi/env 与 ~/.bashrc
+```
+
+- **无需手动申请 GCP 项目**：直接复用本地 Antigravity 客户端内置的官方凭据。
+- **纯净开源、零密钥泄露**：Git 仓库内零硬编码密钥，所有凭据提取与配置均在用户本地运行（文件权限 `0600`）。
+- **全链路自动加载**：CLI 命令行、快捷脚本（`agy-auto`, `agy-1` 等）、Web 看板以及 systemd 守护进程均会自动加载 `~/.config/agy-multi/env`，实现全天候静默刷新。
+
 ---
 
 ## 接力机制工作原理
@@ -88,7 +101,9 @@ agy-multi serve --port 8989
 agy-multi serve --host 0.0.0.0 --port 8989 --token YOUR_SECURE_TOKEN  # 局域网 / 远程访问
 ```
 
-- **配额一览** — ♊ Gemini 5 小时 + 周配额进度条，精确到秒的重置倒计时；🧠 Claude & GPT 周配额进度与耗尽预警。
+- **配额一览（官方顺序对齐）** — 严格对齐官方展示逻辑：优先显示 **5 小时滚动配额**，随后显示 **周配额**，精确到秒的重置倒计时；🧠 Claude & GPT 周配额进度与耗尽预警。
+- **高密度紧凑布局** — 重置倒计时胶囊气泡（Countdown Pill）深度融合至配额进度条（Quota Meter）内部，消除独立多余高度，卡片垂直信息密度显著提升。
+- **智能预警机制** — 当周配额低于 20% 时，状态栏呈现醒目的黄色预警徽标（`LOW_WEEKLY`），兼具低额度提醒与自动接力兜底能力。
 - **Token 深度分析** — 趋势曲线支持 Total / Read·Write·Cache / Thinking·Output 视图，线性 ↔ 对数刻度自由切换，GitHub 风格活跃度日历支持悬浮查看明细（Prompt / Thinking / Output / 请求次数）。
 - **一键接力** — 点击任意会话卡片上的 🚀 接力 按钮即可立即迁移。
 - **设置面板** — 配额保留缓冲滑块（0–50%，步长 0.5%）、自动接管开关、实时保存生效。
@@ -96,6 +111,7 @@ agy-multi serve --host 0.0.0.0 --port 8989 --token YOUR_SECURE_TOKEN  # 局域�
 - **终端导出** — `agy-multi usage`，支持 `--csv`、`--html`、`--json` 静态导出。
 
 > 🔐 **安全性**：默认仅监听本地回环地址；一旦绑定非 127.0.0.1 地址，所有端点（包括 GET）均强制要求鉴权。未指定 `--token` 时将自动生成高强度 Token 并打印在控制台。OAuth 凭据文件权限为 `0600`，目录权限为 `0700`。
+
 
 ---
 
@@ -128,6 +144,7 @@ agy-multi relay --list-candidates     # 列出各候选账号的配额得分、5
 agy-multi config                      # 查看当前配置
 agy-multi config --min-buffer 5       # 设置保留缓冲配额 % (0–50)；达到阈值即触发交接
 agy-multi config --on-no-target pause # 无可用账号策略：pause (默认：打印倒计时并自动唤醒) | burn_buffer (消耗缓冲至 429)
+agy-multi creds [--save]          # 检查或自动发现并保存 OAuth 客户端凭证（支持 7×24h 后台静默续期）
 agy-multi usage [--csv] [--html PATH] [--json]
 ```
 
