@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+usage_dashboard.html
+jev-research/
+LOCAL_CONFIG*
+# Local agent notes. Not part of the public project.
+AGENTS.md
+HANDOFF.md
+*.bak
+*.backup
+build/
+dist/
+*.egg-info/
