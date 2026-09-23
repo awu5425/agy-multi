@@ -15,6 +15,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+from .utils import inspect_token_file, evaluate_token_expiry
+
 
 def decode_varint(data: bytes, pos: int):
     val = 0
@@ -632,19 +634,12 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
     auth_valid = bool(profile.get("auth", {}).get("is_valid", False))
     p_name = profile.get("name", "")
 
-    # Check token expiry directly from token file as well
+    # Check token expiry directly via inspect_token_file
     token_file = pdir / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
-    token_is_expired = False
-    if token_file.is_file():
-        try:
-            with open(token_file, "r", encoding="utf-8") as f:
-                t_data = json.load(f)
-            t_exp = t_data.get("token", {}).get("expiry")
-            if t_exp:
-                exp_str = str(t_exp).replace("Z", "+00:00")
-                token_is_expired = datetime.fromisoformat(exp_str).timestamp() < time.time()
-        except Exception:
-            pass
+    token_auth = inspect_token_file(token_file, now_ts=current_ts)
+    token_exp_info = token_auth.get("expiry_info", {})
+    token_is_expired = token_exp_info.get("is_expired", False)
+    token_expiring_soon = token_exp_info.get("state") == "expiring_soon"
 
     oq_reason = str(official_quota.get("reason", ""))
     oq_reason_lower = oq_reason.lower()
@@ -821,6 +816,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
         "name": profile["name"],
         "email": profile["email"],
         "auth": profile["auth"],
+        "token_expiry": token_exp_info,
         "active_pids": profile["active_pids"],
         "region_restricted": bool(profile.get("region_restricted")),
         "show_on_dashboard": profile_on_dashboard(profile),
@@ -2730,6 +2726,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         statusOff: "关闭",
         lblAutoRelayStat: "自动接管:",
         statusExpired: "⚠️ 凭证已过期",
+        statusExpiringSoon: "⚠️ Token 临期",
+        statusAutoRefresh: "自动刷新就绪",
+        statusValid: "有效",
         statusQuotaUnavail: "⚠️ 配额不可用",
         relayDisabledNotAuth: "未登录，无法发起接力",
         relayDisabledExpired: "凭证已过期，无法发起接力",
@@ -2878,6 +2877,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         statusRegion: "⚠️ Region Restricted",
         statusClaudeEx: "⚠️ Claude Exhausted",
         statusExpired: "⚠️ Token Expired",
+        statusExpiringSoon: "⚠️ Token Expiring Soon",
+        statusAutoRefresh: "Auto-refresh Ready",
+        statusValid: "Valid",
         statusQuotaUnavail: "⚠️ Quota Unavailable",
         relayDisabledNotAuth: "Not logged in, cannot relay",
         relayDisabledExpired: "Token expired, cannot relay",
@@ -3189,11 +3191,17 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           }}
         }}
 
+        const tokenExpInfo = (acc.token_expiry || (acc.auth || {{}}).expiry_info) || {{}};
+        const isTokenExpiringSoon = tokenExpInfo.state === 'expiring_soon';
+
         // Only show status badge for anomaly states; hide when account is fully healthy (READY with no warnings)
-        const isAnomalyState = usability.code !== 'READY' || pctWkInt < 20 || pct5hInt < 20;
+        const isAnomalyState = usability.code !== 'READY' || pctWkInt < 20 || pct5hInt < 20 || isTokenExpiringSoon;
 
         let badgeClass = usability.badge_class || 'status-ready';
-        if (!isAccountDisabled && !isExhausted) {{
+        if (isTokenExpiringSoon && usability.code === 'READY') {{
+          badgeClass = 'status-warning';
+          statusLabel = `${{t('statusExpiringSoon')}} (${{tokenExpInfo.days_remaining}}d)`;
+        }} else if (!isAccountDisabled && !isExhausted) {{
           if (pctWkInt <= 10 || pct5hInt <= 10) {{
             badgeClass = 'status-exhausted';
           }} else if (usability.code === 'LOW_WEEKLY' || pctWkInt <= 25 || pct5hInt <= 25) {{
@@ -4505,9 +4513,12 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         const tier = sub.label || t('tierUnknown');
         const restricted = !!(acc.region_restricted || (sub.ineligible || []).indexOf('UNSUPPORTED_LOCATION') >= 0);
         const code = (acc.usability || {{}}).code;
+        const expInfo = (acc.token_expiry || (acc.auth || {{}}).expiry_info) || {{}};
         let login = t('loggedIn');
         if (code === 'NOT_AUTH') login = t('statusNotAuth');
-        else if (code === 'TOKEN_EXPIRED') login = t('statusExpired');
+        else if (code === 'TOKEN_EXPIRED' || expInfo.state === 'expired') login = `<span class="status-tag status-exhausted">${{t('statusExpired')}}</span>`;
+        else if (expInfo.state === 'expiring_soon') login = `<span class="status-tag status-warning">${{t('statusExpiringSoon')}} (${{expInfo.days_remaining}}d)</span>`;
+        else if (expInfo.state === 'refreshable') login = `<span class="status-tag status-ready">${{t('statusAutoRefresh')}}</span>`;
         else if (code === 'REGION_PENDING') login = t('statusRegion');
         const tr = document.createElement('tr');
         const checked = acc.show_on_dashboard !== false ? 'checked' : '';

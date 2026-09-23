@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agy-multi"
-version = "1.2.0"
+version = "1.3.0"
 description = "Google Antigravity (agy) multi-account manager, concurrent isolation runner, and usage dashboard on Linux"
 readme = "README.md"
 authors = [{ name = "agy-multi contributors" }]
@@ -25,7 +25,6 @@ classifiers = [
 
 [project.scripts]
 agy-multi = "agy_multi.cli:main"
-gemini-switch = "agy_multi.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -254,3 +254,208 @@ def test_import_existing_token_permissions(tmp_path):
     assert target.is_file()
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert stat.S_IMODE(mgr.get_profile_dir("coder").stat().st_mode) == 0o700
+
+
+def test_evaluate_token_expiry_states():
+    from agy_multi.utils import evaluate_token_expiry
+    now = 1000000.0
+
+    # 1. Valid (> 7 days)
+    res_valid = evaluate_token_expiry(now + 10 * 86400, has_refresh_token=False, now_ts=now)
+    assert res_valid["state"] == "valid"
+    assert res_valid["is_expired"] is False
+    assert res_valid["days_remaining"] == 10.0
+    assert res_valid["warning"] is None
+
+    # 2. Expiring soon (3 days, no refresh token)
+    res_soon = evaluate_token_expiry(now + 3 * 86400, has_refresh_token=False, now_ts=now)
+    assert res_soon["state"] == "expiring_soon"
+    assert res_soon["is_expired"] is False
+    assert res_soon["days_remaining"] == 3.0
+    assert "3.0" in res_soon["warning"]
+
+    # 3. Expiring soon with refresh token (treated as valid/auto-refreshable)
+    res_soon_ref = evaluate_token_expiry(now + 3 * 86400, has_refresh_token=True, now_ts=now)
+    assert res_soon_ref["state"] == "valid"
+    assert res_soon_ref["has_refresh_token"] is True
+
+    # 4. Expired without refresh token
+    res_exp = evaluate_token_expiry(now - 100, has_refresh_token=False, now_ts=now)
+    assert res_exp["state"] == "expired"
+    assert res_exp["is_expired"] is True
+    assert "Token 已过期" in res_exp["warning"]
+
+    # 5. Expired with refresh token
+    res_exp_ref = evaluate_token_expiry(now - 100, has_refresh_token=True, now_ts=now)
+    assert res_exp_ref["state"] == "expired"
+    assert res_exp_ref["is_expired"] is True
+    assert res_exp_ref["has_refresh_token"] is True
+    assert "可自动刷新" in res_exp_ref["warning"]
+
+    # 6. None / empty
+    res_none = evaluate_token_expiry(None, has_refresh_token=True, now_ts=now)
+    assert res_none["expiry_ts"] is None
+    assert res_none["state"] == "refreshable"
+
+
+def test_inspect_token_file_with_fallback(tmp_path):
+    from agy_multi.utils import inspect_token_file
+    import json
+    import base64
+
+    # Case 1: missing all tokens
+    tok_path = tmp_path / "antigravity-oauth-token"
+    res1 = inspect_token_file(tok_path)
+    assert res1["status"] == "NOT_LOGGED_IN"
+    assert res1["is_valid"] is False
+
+    # Case 2: fallback to jetski-standalone-oauth-token JWT
+    jetski_path = tmp_path / "jetski-standalone-oauth-token"
+    payload = json.dumps({"email": "jetski@example.com", "exp": 2000000000})
+    b64_p = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("utf-8").rstrip("=")
+    fake_jwt = f"eyJhbGciOiJub25lIn0.{b64_p}."
+    jetski_path.write_text(fake_jwt, encoding="utf-8")
+
+    res2 = inspect_token_file(tok_path)
+    assert res2["status"] == "VALID"
+    assert res2["email"] == "jetski@example.com"
+    assert res2["is_valid"] is True
+    assert res2["expiry_info"]["is_expired"] is False
+
+
+def test_sanitize_settings_json():
+    from agy_multi.utils import sanitize_settings_json
+
+    raw = {
+        "theme": "dark",
+        "toolPermission": "always-proceed",
+        "mcpServers": {"github": {"command": "gh"}},
+        "oauth_creds": {"client_id": "secret123"},
+        "token": "sensitive_tok",
+        "refreshToken": "refresh123",
+        "trustedWorkspaces": ["/home/test"],
+    }
+
+    # Preserves mcpServers when allowed
+    sanitized = sanitize_settings_json(raw, allow_mcp=True)
+    assert sanitized["theme"] == "dark"
+    assert sanitized["toolPermission"] == "always-proceed"
+    assert "mcpServers" in sanitized
+    assert "oauth_creds" not in sanitized
+    assert "token" not in sanitized
+    assert "refreshToken" not in sanitized
+    assert sanitized["trustedWorkspaces"] == ["/home/test"]
+
+    # Strips mcpServers when not allowed
+    sanitized_no_mcp = sanitize_settings_json(raw, allow_mcp=False)
+    assert "mcpServers" not in sanitized_no_mcp
+    assert sanitized_no_mcp["theme"] == "dark"
+
+
+def test_inherit_profile_config_and_security_boundary(tmp_path):
+    from agy_multi.utils import inherit_profile_config
+    import json
+    import stat
+
+    src_gemini = tmp_path / "src_gemini"
+    src_cfg = src_gemini / "config"
+    src_cli = src_gemini / "antigravity-cli"
+    src_cfg.mkdir(parents=True)
+    src_cli.mkdir(parents=True)
+
+    # 1. Setup mock skills
+    skills_dir = src_cfg / "skills" / "demo_skill"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("# Demo Skill\n", encoding="utf-8")
+
+    # 2. Setup mock plugins
+    plugins_dir = src_cfg / "plugins" / "demo_plugin"
+    plugins_dir.mkdir(parents=True)
+    (plugins_dir / "plugin.json").write_text("{}", encoding="utf-8")
+
+    # 3. Setup mock mcp_config.json
+    (src_cfg / "mcp_config.json").write_text(json.dumps({"mcpServers": {"local": {}}}), encoding="utf-8")
+
+    # 4. Setup mock settings.json with secret that must be stripped
+    (src_cli / "settings.json").write_text(json.dumps({
+        "theme": "nord",
+        "accessToken": "secret_leak",
+        "mcpServers": {"fetch": {}}
+    }), encoding="utf-8")
+
+    # 5. Place forbidden credential in source to verify it never copies over
+    (src_cli / "antigravity-oauth-token").write_text("leaked_token", encoding="utf-8")
+
+    target_profile_dir = tmp_path / "target_profile"
+    report = inherit_profile_config(
+        target_profile_dir,
+        src_gemini,
+        inherit_mcp=True,
+        inherit_skills=True,
+        inherit_plugins=True,
+        inherit_settings=True,
+        inherit_hooks=True,
+        copy_mode=True,
+    )
+
+    assert report["skills_inherited"] is True
+    assert report["plugins_inherited"] is True
+    assert report["mcp_inherited"] is True
+    assert report["settings_inherited"] is True
+
+    tgt_cfg = target_profile_dir / ".gemini" / "config"
+    tgt_cli = target_profile_dir / ".gemini" / "antigravity-cli"
+
+    # Verify skill copied and readable
+    assert (tgt_cfg / "skills" / "demo_skill" / "SKILL.md").is_file()
+    # Verify plugin copied
+    assert (tgt_cfg / "plugins" / "demo_plugin" / "plugin.json").is_file()
+    # Verify MCP config copied with 0o600
+    tgt_mcp = tgt_cfg / "mcp_config.json"
+    assert tgt_mcp.is_file()
+    assert stat.S_IMODE(tgt_mcp.stat().st_mode) == 0o600
+
+    # Verify settings sanitized (sensitive token stripped)
+    tgt_settings = tgt_cli / "settings.json"
+    assert tgt_settings.is_file()
+    s_data = json.loads(tgt_settings.read_text(encoding="utf-8"))
+    assert s_data["theme"] == "nord"
+    assert "accessToken" not in s_data
+    assert "mcpServers" in s_data
+
+    # Strict security boundary check: token file must NOT exist
+    assert not (tgt_cli / "antigravity-oauth-token").exists()
+
+
+def test_profile_manager_clone_and_inherit(tmp_path):
+    import json
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    host_cfg = mock_home / ".gemini" / "config"
+    host_cfg.mkdir(parents=True)
+    (host_cfg / "mcp_config.json").write_text(json.dumps({"mcpServers": {"test": {}}}), encoding="utf-8")
+
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+
+    # 1. Add profile with inheritance from host
+    p1 = mgr.add_profile("prof1", "p1@example.com", inherit_from="host")
+    assert p1["inherited_from"] == "host"
+    p1_mcp = mgr.get_profile_dir("prof1") / ".gemini" / "config" / "mcp_config.json"
+    assert p1_mcp.is_file()
+
+    # 2. Clone from prof1 into prof2
+    p2 = mgr.clone_profile("prof1", "prof2", "p2@example.com")
+    assert p2["name"] == "prof2"
+    assert p2["inherited_from"] == "prof1"
+    p2_mcp = mgr.get_profile_dir("prof2") / ".gemini" / "config" / "mcp_config.json"
+    assert p2_mcp.is_file()
+
+    # 3. Inherit on existing profile
+    p3 = mgr.add_profile("prof3", "p3@example.com")
+    p3_mcp = mgr.get_profile_dir("prof3") / ".gemini" / "config" / "mcp_config.json"
+    assert not p3_mcp.exists()
+
+    report = mgr.inherit_profile_config("prof3", source="prof1")
+    assert report["mcp_inherited"] is True
+    assert p3_mcp.is_file()

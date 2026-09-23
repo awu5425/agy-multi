@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, List
 
 from .utils import (
     sync_profile_environment,
+    inherit_profile_config,
     inspect_token_file,
     get_profile_active_pids,
     detect_real_home,
@@ -147,7 +148,14 @@ class ProfileManager:
         name: str,
         email: str,
         description: str = "",
-        custom_id: Optional[str] = None
+        custom_id: Optional[str] = None,
+        inherit_from: Optional[str] = None,
+        inherit_mcp: bool = True,
+        inherit_skills: bool = True,
+        inherit_plugins: bool = True,
+        inherit_settings: bool = True,
+        inherit_hooks: bool = True,
+        copy_mode: bool = False,
     ) -> Dict[str, Any]:
         registry = self._load_registry()
         profiles = registry.get("profiles", [])
@@ -176,9 +184,117 @@ class ProfileManager:
         pdir = self.get_profile_dir(name)
         sync_profile_environment(pdir, self.real_home)
 
+        # Handle configuration inheritance if requested
+        if inherit_from:
+            if inherit_from.lower() == "host":
+                src_gemini = self.real_home / ".gemini"
+            else:
+                src_p = self.find_profile(inherit_from)
+                if not src_p:
+                    raise ValueError(f"Source profile '{inherit_from}' for inheritance not found.")
+                src_gemini = self.get_profile_dir(src_p["name"]) / ".gemini"
+
+            if src_gemini.is_dir():
+                inherit_report = inherit_profile_config(
+                    pdir,
+                    src_gemini,
+                    inherit_mcp=inherit_mcp,
+                    inherit_skills=inherit_skills,
+                    inherit_plugins=inherit_plugins,
+                    inherit_settings=inherit_settings,
+                    inherit_hooks=inherit_hooks,
+                    copy_mode=copy_mode,
+                )
+                new_profile["inherited_from"] = inherit_from
+                new_profile["inheritance_report"] = inherit_report
+
         profiles.append(new_profile)
         registry["profiles"] = profiles
         self._save_registry(registry)
+        return new_profile
+
+    def inherit_profile_config(
+        self,
+        target_name_or_id: str,
+        source: str = "host",
+        inherit_mcp: bool = True,
+        inherit_skills: bool = True,
+        inherit_plugins: bool = True,
+        inherit_settings: bool = True,
+        inherit_hooks: bool = True,
+        copy_mode: bool = False,
+    ) -> Dict[str, Any]:
+        """Inherits or syncs non-credential configuration from source (host or profile) to target."""
+        target = self.find_profile(target_name_or_id)
+        if not target:
+            raise ValueError(f"Target profile '{target_name_or_id}' not found.")
+        tgt_dir = self.get_profile_dir(target["name"])
+
+        if source.lower() == "host":
+            src_gemini = self.real_home / ".gemini"
+        else:
+            src_p = self.find_profile(source)
+            if not src_p:
+                raise ValueError(f"Source profile '{source}' not found.")
+            src_gemini = self.get_profile_dir(src_p["name"]) / ".gemini"
+
+        if not src_gemini.is_dir():
+            raise ValueError(f"Source configuration directory does not exist: {src_gemini}")
+
+        report = inherit_profile_config(
+            tgt_dir,
+            src_gemini,
+            inherit_mcp=inherit_mcp,
+            inherit_skills=inherit_skills,
+            inherit_plugins=inherit_plugins,
+            inherit_settings=inherit_settings,
+            inherit_hooks=inherit_hooks,
+            copy_mode=copy_mode,
+        )
+
+        # Update registry with inheritance metadata
+        registry = self._load_registry()
+        for p in registry.get("profiles", []):
+            if str(p.get("id")) == str(target["id"]):
+                p["inherited_from"] = source
+                break
+        self._save_registry(registry)
+
+        return report
+
+    def clone_profile(
+        self,
+        source_identifier: str,
+        new_name: str,
+        new_email: str,
+        description: str = "",
+        custom_id: Optional[str] = None,
+        inherit_mcp: bool = True,
+        inherit_skills: bool = True,
+        inherit_plugins: bool = True,
+        inherit_settings: bool = True,
+        inherit_hooks: bool = True,
+        copy_mode: bool = True,
+    ) -> Dict[str, Any]:
+        """Clones non-credential configs, skills, plugins, and MCP from an existing profile into a new profile."""
+        src_p = self.find_profile(source_identifier)
+        if not src_p:
+            raise ValueError(f"Source profile '{source_identifier}' not found.")
+
+        desc = description or f"Cloned from [{src_p['id']}] {src_p['name']}"
+        new_profile = self.add_profile(
+            name=new_name,
+            email=new_email,
+            description=desc,
+            custom_id=custom_id,
+            inherit_from=src_p["name"],
+            inherit_mcp=inherit_mcp,
+            inherit_skills=inherit_skills,
+            inherit_plugins=inherit_plugins,
+            inherit_settings=inherit_settings,
+            inherit_hooks=inherit_hooks,
+            copy_mode=copy_mode,
+        )
         return new_profile
 
     def update_profile(

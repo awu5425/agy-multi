@@ -21,14 +21,11 @@ EOF
 chmod +x "$LOCAL_BIN/agy-multi"
 echo "✓ Installed $LOCAL_BIN/agy-multi"
 
-# 1.1 Install backward-compatible gemini-switch alias
-cat << EOF > "$LOCAL_BIN/gemini-switch"
-#!/usr/bin/env bash
-exec "$LOCAL_BIN/agy-multi" "\$@"
-EOF
-
-chmod +x "$LOCAL_BIN/gemini-switch"
-echo "✓ Installed alias: $LOCAL_BIN/gemini-switch -> agy-multi"
+# 1.1 Clean up legacy gemini-switch command if present
+if [ -f "$LOCAL_BIN/gemini-switch" ]; then
+    rm -f "$LOCAL_BIN/gemini-switch"
+    echo "✓ Cleaned up deprecated $LOCAL_BIN/gemini-switch"
+fi
 
 # 2. Run agy-multi install to generate/update shortcuts
 "$LOCAL_BIN/agy-multi" install

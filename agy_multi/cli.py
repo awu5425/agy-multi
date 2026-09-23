@@ -1,6 +1,6 @@
 """
-gemini_switch.cli
-Command Line Interface for agy-multi (backward-compatible with gemini-switch).
+agy_multi.cli
+Command Line Interface for agy-multi.
 """
 
 import sys
@@ -41,12 +41,31 @@ def cmd_list(manager: ProfileManager, args: argparse.Namespace) -> int:
     headers = ["ID", "Name", "Target Email", "Status", "Auth Email", "Active PIDs", "Description"]
     rows = []
     for p in profiles:
-        auth = p["auth"]
+        auth = p.get("auth", {})
         is_valid = auth.get("is_valid", False)
-        status_str = f"{GREEN}● Logged In{RESET}" if is_valid else f"{RED}○ Not Auth{RESET}"
+        exp_info = auth.get("expiry_info", {})
+        exp_state = exp_info.get("state")
+        days_rem = exp_info.get("days_remaining")
+
+        if not is_valid:
+            if exp_state == "expired":
+                status_str = f"{RED}○ Expired{RESET}"
+            else:
+                status_str = f"{RED}○ Not Auth{RESET}"
+        elif exp_state == "expiring_soon":
+            status_str = f"{YELLOW}⚠️ Expiring ({days_rem}d){RESET}"
+        elif exp_state == "refreshable":
+            status_str = f"{GREEN}● Logged In (Auto){RESET}"
+        else:
+            status_str = f"{GREEN}● Logged In{RESET}"
+
         auth_email = auth.get("email") or "-"
         pids_str = ", ".join(map(str, p["active_pids"])) if p["active_pids"] else "idle"
-        
+
+        desc = p.get("description", "")
+        if p.get("inherited_from"):
+            desc = f"{desc} [from {p['inherited_from']}]" if desc else f"[from {p['inherited_from']}]"
+
         rows.append([
             p["id"],
             p["name"],
@@ -54,7 +73,7 @@ def cmd_list(manager: ProfileManager, args: argparse.Namespace) -> int:
             status_str,
             auth_email,
             pids_str,
-            p.get("description", "")
+            desc
         ])
 
     print(f"\n{BOLD}{CYAN}=== Google AI Pro Profiles (agy-multi) ==={RESET}\n")
@@ -106,6 +125,20 @@ def cmd_status(manager: ProfileManager, args: argparse.Namespace) -> int:
     print(f"  • Weekly Quota : {CYAN}{g_wk_pct:.1f}%{RESET} (Reset: {g_wk_reset})")
     print(f"  • 5H Quota     : {CYAN}{g_5h_pct:.1f}%{RESET} (Reset: {g_5h_reset})")
     print(f"  • Status       : {GREEN}Active PID {pids_str}{RESET}" if pids else f"  • Status       : {CYAN}Idle{RESET}")
+
+    auth_info = curr.get("auth", {})
+    exp_info = auth_info.get("expiry_info", {})
+    exp_state = exp_info.get("state")
+    exp_iso = exp_info.get("expiry_iso") or auth_info.get("expiry") or "-"
+    if exp_state == "expiring_soon":
+        exp_display = f"{YELLOW}{exp_iso} (⚠️ Expiring in {exp_info.get('days_remaining')}d - Re-login recommended){RESET}"
+    elif exp_state == "refreshable":
+        exp_display = f"{CYAN}{exp_iso}{RESET} ({GREEN}Auto-refreshable ✅{RESET})"
+    elif exp_state == "expired":
+        exp_display = f"{RED}{exp_iso} (⚠️ Expired){RESET}"
+    else:
+        exp_display = f"{CYAN}{exp_iso}{RESET}"
+    print(f"  • Token Expiry : {exp_display}")
     print()
 
     # 3. Next Relay Candidate
@@ -674,21 +707,106 @@ def cmd_login(manager: ProfileManager, args: argparse.Namespace) -> int:
 
 def cmd_add(manager: ProfileManager, args: argparse.Namespace) -> int:
     try:
+        inherit_from = None
+        if getattr(args, "inherit", False):
+            inherit_from = "host"
+        elif getattr(args, "inherit_from", None):
+            inherit_from = args.inherit_from
+
         new_p = manager.add_profile(
             name=args.name,
             email=args.email,
             description=args.description or "",
-            custom_id=args.id
+            custom_id=getattr(args, "custom_id", None) or getattr(args, "id", None),
+            inherit_from=inherit_from,
+            inherit_mcp=not getattr(args, "no_mcp", False),
+            inherit_skills=not getattr(args, "no_skills", False),
+            inherit_plugins=not getattr(args, "no_plugins", False),
+            inherit_settings=not getattr(args, "no_settings", False),
+            inherit_hooks=not getattr(args, "no_hooks", False),
+            copy_mode=getattr(args, "copy", False),
         )
         print(f"{GREEN}✓ Profile added successfully!{RESET}")
         print(f"  ID: {BOLD}{new_p['id']}{RESET}")
         print(f"  Name: {BOLD}{new_p['name']}{RESET}")
         print(f"  Email: {BOLD}{new_p['email']}{RESET}")
+        if inherit_from:
+            report = new_p.get("inheritance_report", {})
+            skills_mark = f"{GREEN}✓{RESET}" if report.get("skills_inherited") else f"{YELLOW}none{RESET}"
+            mcp_mark = f"{GREEN}✓{RESET}" if report.get("mcp_inherited") else f"{YELLOW}none{RESET}"
+            plugins_mark = f"{GREEN}✓{RESET}" if report.get("plugins_inherited") else f"{YELLOW}none{RESET}"
+            settings_mark = f"{GREEN}✓{RESET}" if report.get("settings_inherited") else f"{YELLOW}none{RESET}"
+            hooks_mark = f"{GREEN}✓{RESET}" if report.get("hooks_inherited") else f"{YELLOW}none{RESET}"
+            print(f"  Inherited: {CYAN}from '{inherit_from}'{RESET} (Skills: {skills_mark}, MCP: {mcp_mark}, Plugins: {plugins_mark}, Settings: {settings_mark}, Hooks: {hooks_mark})")
         print(f"\nTo authenticate this profile, run:")
         print(f"  {CYAN}{BOLD}agy-multi login {new_p['id']}{RESET}\n")
         return 0
     except Exception as e:
         print(f"{RED}Error adding profile: {e}{RESET}")
+        return 1
+
+
+def cmd_clone(manager: ProfileManager, args: argparse.Namespace) -> int:
+    try:
+        new_p = manager.clone_profile(
+            source_identifier=args.source,
+            new_name=args.name,
+            new_email=args.email,
+            description=args.description or "",
+            custom_id=getattr(args, "custom_id", None) or getattr(args, "id", None),
+            inherit_mcp=not getattr(args, "no_mcp", False),
+            inherit_skills=not getattr(args, "no_skills", False),
+            inherit_plugins=not getattr(args, "no_plugins", False),
+            inherit_settings=not getattr(args, "no_settings", False),
+            inherit_hooks=not getattr(args, "no_hooks", False),
+            copy_mode=not getattr(args, "link", False),
+        )
+        print(f"{GREEN}✓ Profile cloned successfully from '{args.source}'!{RESET}")
+        print(f"  ID: {BOLD}{new_p['id']}{RESET}")
+        print(f"  Name: {BOLD}{new_p['name']}{RESET}")
+        print(f"  Email: {BOLD}{new_p['email']}{RESET}")
+        report = new_p.get("inheritance_report", {})
+        skills_mark = f"{GREEN}✓{RESET}" if report.get("skills_inherited") else f"{YELLOW}none{RESET}"
+        mcp_mark = f"{GREEN}✓{RESET}" if report.get("mcp_inherited") else f"{YELLOW}none{RESET}"
+        plugins_mark = f"{GREEN}✓{RESET}" if report.get("plugins_inherited") else f"{YELLOW}none{RESET}"
+        settings_mark = f"{GREEN}✓{RESET}" if report.get("settings_inherited") else f"{YELLOW}none{RESET}"
+        hooks_mark = f"{GREEN}✓{RESET}" if report.get("hooks_inherited") else f"{YELLOW}none{RESET}"
+        print(f"  Cloned Items: (Skills: {skills_mark}, MCP: {mcp_mark}, Plugins: {plugins_mark}, Settings: {settings_mark}, Hooks: {hooks_mark})")
+        print(f"\nTo authenticate this profile, run:")
+        print(f"  {CYAN}{BOLD}agy-multi login {new_p['id']}{RESET}\n")
+        return 0
+    except Exception as e:
+        print(f"{RED}Error cloning profile: {e}{RESET}")
+        return 1
+
+
+def cmd_inherit(manager: ProfileManager, args: argparse.Namespace) -> int:
+    try:
+        report = manager.inherit_profile_config(
+            target_name_or_id=args.target,
+            source=args.source or "host",
+            inherit_mcp=not getattr(args, "no_mcp", False),
+            inherit_skills=not getattr(args, "no_skills", False),
+            inherit_plugins=not getattr(args, "no_plugins", False),
+            inherit_settings=not getattr(args, "no_settings", False),
+            inherit_hooks=not getattr(args, "no_hooks", False),
+            copy_mode=getattr(args, "copy", False),
+        )
+        print(f"{GREEN}✓ Configuration inherited successfully for profile '{args.target}'!{RESET}")
+        skills_mark = f"{GREEN}✓{RESET}" if report.get("skills_inherited") else f"{YELLOW}none{RESET}"
+        mcp_mark = f"{GREEN}✓{RESET}" if report.get("mcp_inherited") else f"{YELLOW}none{RESET}"
+        plugins_mark = f"{GREEN}✓{RESET}" if report.get("plugins_inherited") else f"{YELLOW}none{RESET}"
+        settings_mark = f"{GREEN}✓{RESET}" if report.get("settings_inherited") else f"{YELLOW}none{RESET}"
+        hooks_mark = f"{GREEN}✓{RESET}" if report.get("hooks_inherited") else f"{YELLOW}none{RESET}"
+        print(f"  Source: {CYAN}{report.get('source')}{RESET}")
+        print(f"  Items: (Skills: {skills_mark}, MCP: {mcp_mark}, Plugins: {plugins_mark}, Settings: {settings_mark}, Hooks: {hooks_mark})")
+        if report.get("copied_items"):
+            print(f"  Copied : {', '.join(report['copied_items'])}")
+        if report.get("linked_items"):
+            print(f"  Linked : {', '.join(report['linked_items'])}")
+        return 0
+    except Exception as e:
+        print(f"{RED}Error inheriting configuration: {e}{RESET}")
         return 1
 
 
@@ -728,7 +846,7 @@ def cmd_install_helpers(manager: ProfileManager, args: argparse.Namespace) -> in
     local_bin = manager.real_home / ".local" / "bin"
     local_bin.mkdir(parents=True, exist_ok=True)
 
-    # Clean up any existing agy-* shortcuts that are managed by agy-multi / gemini-switch
+    # Clean up any existing agy-* shortcuts that are managed by agy-multi
     for f in local_bin.glob("agy-*"):
         if f.is_file():
             try:
@@ -738,6 +856,15 @@ def cmd_install_helpers(manager: ProfileManager, args: argparse.Namespace) -> in
                         f.unlink()
             except Exception:
                 pass
+
+    # Purge legacy gemini-switch binary if present
+    legacy_bin = local_bin / "gemini-switch"
+    if legacy_bin.exists():
+        try:
+            legacy_bin.unlink()
+            print(f"{GREEN}✓ Removed deprecated command: {legacy_bin}{RESET}")
+        except Exception:
+            pass
 
     # 1. Install main agy-multi binary wrapper
     main_bin = local_bin / "agy-multi"
@@ -755,15 +882,6 @@ PYTHONPATH="{package_dir}:$PYTHONPATH" python3 -m agy_multi.cli "$@"
         f.write(script_content)
     main_bin.chmod(0o755)
     print(f"{GREEN}✓ Installed: {main_bin}{RESET}")
-
-    # 1.1 Install backward-compatible gemini-switch alias wrapper
-    compat_bin = local_bin / "gemini-switch"
-    with open(compat_bin, "w", encoding="utf-8") as f:
-        f.write(f"""#!/usr/bin/env bash
-exec "{main_bin}" "$@"
-""")
-    compat_bin.chmod(0o755)
-    print(f"{GREEN}✓ Installed alias: {compat_bin} -> agy-multi{RESET}")
 
     # 2. Install agy-auto (auto-picks best idle profile, runs with watchdog)
     shortcut_auto = local_bin / "agy-auto"
@@ -933,6 +1051,36 @@ def main():
     p_add.add_argument("email", help="Google account email")
     p_add.add_argument("-d", "--description", default="", help="Profile description or purpose")
     p_add.add_argument("--id", dest="custom_id", default=None, help="Custom numeric or short ID")
+    p_add.add_argument("--inherit", action="store_true", help="Inherit non-credential configs, skills, and MCP from host")
+    p_add.add_argument("--inherit-from", default=None, help="Inherit non-credential configs from specified profile or 'host'")
+    p_add.add_argument("--no-mcp", action="store_true", help="Exclude MCP tool configuration when inheriting")
+    p_add.add_argument("--no-skills", action="store_true", help="Exclude Agent skills when inheriting")
+    p_add.add_argument("--no-plugins", action="store_true", help="Exclude Agent plugins when inheriting")
+    p_add.add_argument("--no-settings", action="store_true", help="Exclude settings.json when inheriting")
+    p_add.add_argument("--copy", action="store_true", help="Deep-copy inherited configs instead of symlinking")
+
+    # clone
+    p_clone = subparsers.add_parser("clone", help="Clone non-credential configs, skills, and MCP from an existing profile into a new profile")
+    p_clone.add_argument("source", help="Source profile ID or name to clone from")
+    p_clone.add_argument("name", help="New profile short name")
+    p_clone.add_argument("email", help="New Google account email")
+    p_clone.add_argument("-d", "--description", default="", help="Profile description or purpose")
+    p_clone.add_argument("--id", dest="custom_id", default=None, help="Custom numeric or short ID")
+    p_clone.add_argument("--no-mcp", action="store_true", help="Exclude MCP tool configuration")
+    p_clone.add_argument("--no-skills", action="store_true", help="Exclude Agent skills")
+    p_clone.add_argument("--no-plugins", action="store_true", help="Exclude Agent plugins")
+    p_clone.add_argument("--no-settings", action="store_true", help="Exclude settings.json")
+    p_clone.add_argument("--link", action="store_true", help="Symlink configs instead of deep-copying")
+
+    # inherit / sync-config
+    p_inherit = subparsers.add_parser("inherit", aliases=["sync-config"], help="Inherit or sync non-credential configs, skills, or MCP into an existing profile")
+    p_inherit.add_argument("target", help="Target profile ID or name")
+    p_inherit.add_argument("--from", dest="source", default="host", help="Source profile or 'host' (default: host)")
+    p_inherit.add_argument("--no-mcp", action="store_true", help="Exclude MCP tool configuration")
+    p_inherit.add_argument("--no-skills", action="store_true", help="Exclude Agent skills")
+    p_inherit.add_argument("--no-plugins", action="store_true", help="Exclude Agent plugins")
+    p_inherit.add_argument("--no-settings", action="store_true", help="Exclude settings.json")
+    p_inherit.add_argument("--copy", action="store_true", help="Deep-copy inherited configs instead of symlinking")
 
     # edit / update
     p_edit = subparsers.add_parser("edit", aliases=["update"], help="Edit an existing profile")
@@ -1028,6 +1176,10 @@ def main():
         sys.exit(cmd_login(manager, args))
     elif args.command == "add":
         sys.exit(cmd_add(manager, args))
+    elif args.command == "clone":
+        sys.exit(cmd_clone(manager, args))
+    elif args.command in ("inherit", "sync-config"):
+        sys.exit(cmd_inherit(manager, args))
     elif args.command in ("edit", "update"):
         sys.exit(cmd_edit(manager, args))
     elif args.command == "creds":

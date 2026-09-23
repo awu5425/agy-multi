@@ -1,6 +1,6 @@
 # 产品需求与架构设计文档 (PRD)
 
-**项目名称**：`agy-multi`（兼容别名 `gemini-switch`） — Antigravity (agy) 多账号并发隔离管理与用量监控系统  
+**项目名称**：`agy-multi` — Antigravity (agy) 多账号并发隔离管理与用量监控系统  
 **文档版本**：与软件 v1.2.0 对齐  
 **更新日期**：2026-09-23  
 **状态**：已实施 (Implemented)  
