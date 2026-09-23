@@ -2544,6 +2544,8 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         statusReady: "● 可用",
         statusReady100: "● 满额可用",
         statusExhausted: "🚫 周额度已耗尽",
+        statusExhaustedGemini: "🚫 Gemini额度已耗尽",
+        statusExhaustedBoth: "🚫 额度已耗尽",
         statusCooldown: "⏳ 5H冷却中",
         statusNotAuth: "○ 未登录",
         statusRegion: "⚠️ 地区受限",
@@ -2706,6 +2708,8 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         statusReady: "● Ready",
         statusReady100: "● Ready (100%)",
         statusExhausted: "🚫 Weekly Limit Reached",
+        statusExhaustedGemini: "🚫 Gemini Quota Exhausted",
+        statusExhaustedBoth: "🚫 Quota Exhausted",
         statusCooldown: "⏳ 5H Cooldown",
         statusNotAuth: "○ Not Logged In",
         statusRegion: "⚠️ Region Restricted",
@@ -2968,11 +2972,17 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         const is5hDisabled = g5h && g5h.disabled;
         const pct5h = isNotAuth ? 0 : (g5h ? g5h.remainingPct : 100);
         const pct5hInt = Math.round(pct5h);
-        const bar5hClass = is5hDisabled ? 'bar-exhausted' : (pct5hInt <= 10 ? 'bar-exhausted' : (pct5hInt <= 25 ? 'bar-warning' : ''));
-        const pct5hClass = is5hDisabled ? 'pct-exhausted' : (pct5hInt <= 10 ? 'pct-exhausted' : (pct5hInt <= 25 ? 'pct-warning' : ''));
+
+        // 5H bar: also treat as empty when weekly quota is ~0% (< 1%).
+        // API may return tiny non-zero fractions (e.g. 0.003) when practically exhausted.
+        const isWklyNearZero = gWk && gWk.remainingPct < 1;
+        const show5hAsDisabled = is5hDisabled || isWklyNearZero;
+        const bar5hClass = show5hAsDisabled ? 'bar-exhausted' : (pct5hInt <= 10 ? 'bar-exhausted' : (pct5hInt <= 25 ? 'bar-warning' : ''));
+        const pct5hClass = show5hAsDisabled ? 'pct-exhausted' : (pct5hInt <= 10 ? 'pct-exhausted' : (pct5hInt <= 25 ? 'pct-warning' : ''));
 
         // Claude & GPT Weekly Limit Remaining (ROW 1: WEEKLY)
-        const isClaudeWkExhausted = cWk && cWk.remainingFraction === 0;
+        // Use < 1% threshold (not strict === 0) for near-zero fractions
+        const isClaudeWkExhausted = cWk && cWk.remainingPct < 1;
         const pctClaudeWk = isNotAuth ? 0 : (cWk ? cWk.remainingPct : 100);
         const pctClaudeWkInt = Math.round(pctClaudeWk);
 
@@ -2985,10 +2995,14 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         let statusLabel = usability.label || t('statusReady');
         if (usability.code === 'NOT_AUTH') statusLabel = t('statusNotAuth');
         else if (usability.code === 'REGION_PENDING') statusLabel = t('statusRegion');
-        else if (usability.code === 'WEEKLY_EXHAUSTED') statusLabel = t('statusExhausted');
+        else if (usability.code === 'WEEKLY_EXHAUSTED') {{
+          // Both Gemini + Claude/GPT exhausted → generic; only Gemini → Gemini-specific
+          const bothExhausted = isWklyNearZero && isClaudeWkExhausted;
+          statusLabel = bothExhausted ? t('statusExhaustedBoth') : t('statusExhaustedGemini');
+        }}
         else if (usability.code === 'CLAUDE_EXHAUSTED') statusLabel = t('statusClaudeEx');
         else if (usability.code === 'COOLDOWN_5H') {{
-          if (is5hDisabled) statusLabel = t('disabledStatus');
+          if (show5hAsDisabled) statusLabel = t('disabledStatus');
           else statusLabel = `${{t('statusCooldown')}} (${{pct5hInt}}%)`;
         }}
         else if (usability.code === 'READY' || usability.code === 'LOW_WEEKLY') {{
@@ -2999,6 +3013,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             statusLabel = t('statusReady100');
           }}
         }}
+
+        // Only show status badge for anomaly states; hide when account is fully healthy (READY with no warnings)
+        const isAnomalyState = usability.code !== 'READY' || pctWkInt < 20 || pct5hInt < 20;
 
         let badgeClass = usability.badge_class || 'status-ready';
         if (!isAccountDisabled && !isExhausted) {{
@@ -3038,9 +3055,13 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         // 2. Gemini 5H Capsule (ROW 2: 5H)
         let fill5hClass = 'fill-green';
         let track5hClass = 'track-green';
-        if (isAccountDisabled || is5hDisabled) {{
+        if (isAccountDisabled) {{
           fill5hClass = 'fill-disabled';
           track5hClass = 'track-disabled';
+        }} else if (show5hAsDisabled) {{
+          // Weekly quota exhausted → show red (not gray) to signal exhaustion, not "not authenticated"
+          fill5hClass = 'fill-red';
+          track5hClass = 'track-red';
         }} else if (pct5hInt <= 10) {{
           fill5hClass = 'fill-red';
           track5hClass = 'track-red';
@@ -3055,7 +3076,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           <span>${{t('statusNotAuth')}}</span>
         ` : (isTokenExpired ? `
           <span>${{t('relayDisabledExpired')}}</span>
-        ` : (is5hDisabled ? `
+        ` : (show5hAsDisabled ? `
           <span>🚫</span> <span>${{t('disabledStatus')}}</span>
         ` : (g5h && g5h.resetTs && pct5hInt < 100 ? `
           <span>⏳</span> <strong class="countdown-time mono" data-reset-ts="${{g5h.resetTs || 0}}">...</strong>
@@ -3166,9 +3187,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
               </div>
             </div>
           </div>
-          <div class="acc-status-row">
+          ${{isAnomalyState ? `<div class="acc-status-row">
             <span class="status-tag ${{badgeClass}}" title="${{usability.reason || ''}}">${{statusLabel}}</span>
-          </div>
+          </div>` : ''}}
 
           <!-- Official Quota: Gemini Models -->
           <div class="metric-block">
@@ -3191,15 +3212,15 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             </div>
 
             <!-- 2. Gemini 5H Limit Remaining (5H SECOND) -->
-            <div class="capsule-meter" title="Gemini 5H: ${{isAccountDisabled ? '-' : (is5hDisabled ? t('disabledStatus') : pct5hInt + '%')}}${{g5h && g5h.resetTs ? ' • ' + t('exactReleaseTime') + formatExactTime(g5h.resetTs) : ''}}">
+            <div class="capsule-meter" title="Gemini 5H: ${{isAccountDisabled ? '-' : (show5hAsDisabled ? t('disabledStatus') : pct5hInt + '%')}}${{g5h && g5h.resetTs ? ' • ' + t('exactReleaseTime') + formatExactTime(g5h.resetTs) : ''}}">
               <div class="capsule-track ${{track5hClass}}">
-                <div class="capsule-fill ${{fill5hClass}}" style="width: ${{isAccountDisabled ? 0 : (is5hDisabled ? 0 : pct5hInt)}}%"></div>
+                <div class="capsule-fill ${{fill5hClass}}" style="width: ${{isAccountDisabled ? 0 : (show5hAsDisabled ? 0 : pct5hInt)}}%"></div>
                 <div class="capsule-content">
                   <span class="capsule-tag">${{t('label5h')}}</span>
                   <div class="capsule-center">
                     ${{cd5hCapsuleHtml}}
                   </div>
-                  <span class="capsule-pct mono">${{isAccountDisabled ? '-' : (is5hDisabled ? '0%' : pct5hInt + '%')}}</span>
+                  <span class="capsule-pct mono">${{isAccountDisabled ? '-' : (show5hAsDisabled ? '0%' : pct5hInt + '%')}}</span>
                 </div>
               </div>
             </div>
@@ -4405,7 +4426,16 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       document.getElementById('policy-modal').style.display = 'none';
     }}
 
-    window.onload = () => {{
+
+    window.onload = async () => {{
+      // Immediately fetch fresh data from server to override embedded snapshot
+      try {{
+        const resp = await fetch('/api/usage', {{ cache: 'no-store' }});
+        if (resp.ok) {{
+          const freshData = await resp.json();
+          Object.assign(data, freshData);
+        }}
+      }} catch(e) {{ /* fallback to embedded snapshot data if server unreachable */ }}
       initDashboard();
       updateCountdowns();
       setInterval(updateCountdowns, 1000);
