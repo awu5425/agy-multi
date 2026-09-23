@@ -278,7 +278,111 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
                 "description": b.get("description", ""),
             }
         res["groups"][g_key] = g_info
+    res["subscription"] = fetch_subscription(token_obj.get("access_token") or "")
     return res
+
+
+def profile_on_dashboard(profile: Dict[str, Any]) -> bool:
+    """Whether this profile's quota belongs on the dashboard.
+
+    An explicit ``show_on_dashboard`` flag wins. Otherwise a region-restricted
+    profile stays off the board until someone opts it in.
+    """
+    if "show_on_dashboard" in profile:
+        return bool(profile.get("show_on_dashboard"))
+    return not bool(profile.get("region_restricted"))
+
+
+def normalize_subscription_tier(raw: Optional[str]) -> Optional[str]:
+    """Map a loadCodeAssist tier id or display name to FREE, PRO, or ULTRA."""
+    lower = (raw or "").strip().lower()
+    if not lower:
+        return None
+    if "ultra" in lower or "helium" in lower:
+        return "ULTRA"
+    if "free" in lower or "starter" in lower:
+        return "FREE"
+    if "pro" in lower or "premium" in lower or "advanced" in lower:
+        return "PRO"
+    return None
+
+
+def subscription_from_load_code_assist(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Read paidTier, then currentTier, then the default allowed tier.
+
+    A real response with no recognized tier is FREE. A missing response stays
+    unknown so a failed request is not shown as a free plan.
+    """
+    if not isinstance(data, dict):
+        return {"tier": None, "label": None, "ineligible": []}
+
+    def ident(tier: Any) -> Optional[str]:
+        if not isinstance(tier, dict):
+            return None
+        value = tier.get("id") or tier.get("name")
+        return str(value) if value else None
+
+    raw = ident(data.get("paidTier")) or ident(data.get("currentTier"))
+    if not raw:
+        for tier in data.get("allowedTiers") or []:
+            if not isinstance(tier, dict):
+                continue
+            if tier.get("id") == "free-tier" or tier.get("isDefault") is True:
+                raw = ident(tier)
+                break
+    tier = normalize_subscription_tier(raw or "free-tier") or "FREE"
+    ineligible = []
+    for item in data.get("ineligibleTiers") or []:
+        if isinstance(item, dict) and item.get("reasonCode"):
+            ineligible.append(str(item["reasonCode"]))
+    labels = {"FREE": "Free", "PRO": "Pro", "ULTRA": "Ultra"}
+    return {"tier": tier, "label": labels.get(tier, tier), "ineligible": ineligible}
+
+
+def fetch_subscription(access_token: str) -> Dict[str, Any]:
+    """Subscription tier from loadCodeAssist. Failure leaves the tier unknown."""
+    if not access_token:
+        return subscription_from_load_code_assist(None)
+    body = json.dumps({"metadata": {"ideType": "ANTIGRAVITY"}}).encode("utf-8")
+    for host in ("daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"):
+        try:
+            req = urllib.request.Request(
+                f"https://{host}/v1internal:loadCodeAssist",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "antigravity-cli",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            return subscription_from_load_code_assist(payload)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                return subscription_from_load_code_assist(None)
+            continue
+        except Exception:
+            continue
+    return subscription_from_load_code_assist(None)
+
+
+def bucket_is_depleted(bucket: Optional[Dict[str, Any]], threshold_pct: float = 1.0) -> bool:
+    """True when a bucket is disabled or its remaining percent is below threshold_pct.
+
+    The quota API often leaves a hair above zero (0.37%) after the weekly limit
+    is effectively gone. The dashboard already treats < 1% as exhausted.
+    """
+    if not bucket:
+        return False
+    if bucket.get("disabled"):
+        return True
+    pct = bucket.get("remainingPct")
+    if pct is None:
+        frac = bucket.get("remainingFraction")
+        if isinstance(frac, (int, float)):
+            pct = float(frac) * 100
+    return isinstance(pct, (int, float)) and float(pct) < threshold_pct
 
 
 def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = None, min_buffer_pct: float = 0.0) -> Dict[str, Any]:
@@ -515,8 +619,8 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
     c_wk = claude_q.get("3p-weekly")
 
     # Comprehensive Usability Assessment
-    g_exhausted = bool(g_wk and g_wk.get("remainingFraction", 1.0) == 0)
-    c_exhausted = bool(c_wk and c_wk.get("remainingFraction", 1.0) == 0)
+    g_exhausted = bucket_is_depleted(g_wk)
+    c_exhausted = bucket_is_depleted(c_wk)
     if official_quota.get("available"):
         weekly_exhausted = g_exhausted
     else:
@@ -718,6 +822,9 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
         "email": profile["email"],
         "auth": profile["auth"],
         "active_pids": profile["active_pids"],
+        "region_restricted": bool(profile.get("region_restricted")),
+        "show_on_dashboard": profile_on_dashboard(profile),
+        "subscription": official_quota.get("subscription") or subscription_from_load_code_assist(None),
         "weekly_quota_exhausted": weekly_exhausted,
         "usability": usability,
         "official_quota": official_quota,
@@ -777,6 +884,8 @@ def get_all_usage(manager) -> Dict[str, Any]:
     for p in profiles:
         u = get_profile_usage(p, current_ts, min_buffer_pct=min_buffer_pct)
         accounts_usage.append(u)
+        if not u.get("show_on_dashboard", True):
+            continue
 
         if u["usability"]["is_usable"]:
             totals["usable_accounts"] += 1
@@ -2252,6 +2361,10 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           <span>🌐</span>
           <span id="lang-btn-text">English</span>
         </button>
+        <button class="btn" id="accounts-view-btn" onclick="toggleAccountAdmin()" style="display:inline-flex;align-items:center;gap:6px">
+          <span>☰</span>
+          <span id="txt-accounts-btn">账号清单</span>
+        </button>
         <button class="btn" onclick="openPolicyModal()" style="display:inline-flex;align-items:center;gap:6px">
           <span>📖</span>
           <span id="txt-policy-btn">接管策略</span>
@@ -2313,6 +2426,27 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       </div>
     </div>
 
+    <div id="account-admin" class="table-card" style="display:none;margin-bottom:1.25rem">
+      <div class="section-title" style="margin-bottom:0.75rem">
+        <span id="txt-accounts-title">账号清单</span>
+        <span id="txt-accounts-hint" style="font-size:0.75rem;font-weight:500;color:var(--text-muted)"></span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th id="th-admin-acc">账号</th>
+            <th id="th-admin-email">邮箱</th>
+            <th id="th-admin-tier">订阅档</th>
+            <th id="th-admin-login">登录</th>
+            <th id="th-admin-region">地区</th>
+            <th id="th-admin-board">额度看板</th>
+          </tr>
+        </thead>
+        <tbody id="account-admin-body"></tbody>
+      </table>
+    </div>
+
+    <div id="quota-view">
     <!-- Accounts Grid -->
     <div class="accounts-grid" id="accounts-container">
       <!-- Injected by JavaScript -->
@@ -2429,6 +2563,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         </tbody>
       </table>
     </div>
+    </div>
   </div>
 
   <script>
@@ -2442,6 +2577,20 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         langBtn: "English",
         refresh: "刷新",
         export: "导出 JSON",
+        accountsBtn: "账号清单",
+        accountsTitle: "账号清单",
+        accountsHint: "取消勾选后，该账号不再出现在额度看板和汇总里。地区受限的账号默认不进看板。",
+        colAccount: "账号",
+        colEmail: "邮箱",
+        colTier: "订阅档",
+        colLogin: "登录",
+        colRegion: "地区",
+        colOnBoard: "额度看板",
+        loggedIn: "已登录",
+        regionYes: "受限",
+        regionNo: "正常",
+        tierUnknown: "未知",
+        backToBoard: "返回看板",
         totalAccounts: "总监控账号状态",
         unitProfiles: "个 Profile",
         readyCount: "满额就绪:",
@@ -2606,6 +2755,20 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         langBtn: "中文",
         refresh: "Refresh",
         export: "Export JSON",
+        accountsBtn: "Accounts",
+        accountsTitle: "Accounts",
+        accountsHint: "Unchecked accounts stay off the quota board and its totals. Region-restricted accounts are off by default.",
+        colAccount: "Account",
+        colEmail: "Email",
+        colTier: "Plan",
+        colLogin: "Sign-in",
+        colRegion: "Region",
+        colOnBoard: "On board",
+        loggedIn: "Signed in",
+        regionYes: "Restricted",
+        regionNo: "OK",
+        tierUnknown: "Unknown",
+        backToBoard: "Back to board",
         totalAccounts: "Monitored Profiles",
         unitProfiles: "Profiles",
         readyCount: "Ready:",
@@ -2785,6 +2948,15 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       setEl('txt-live', t('live'));
       setEl('lang-btn-text', t('langBtn'));
       setEl('txt-policy-btn', t('policyBtn'));
+      setEl('txt-accounts-btn', accountAdminOpen ? t('backToBoard') : t('accountsBtn'));
+      setEl('txt-accounts-title', t('accountsTitle'));
+      setEl('txt-accounts-hint', t('accountsHint'));
+      setEl('th-admin-acc', t('colAccount'));
+      setEl('th-admin-email', t('colEmail'));
+      setEl('th-admin-tier', t('colTier'));
+      setEl('th-admin-login', t('colLogin'));
+      setEl('th-admin-region', t('colRegion'));
+      setEl('th-admin-board', t('colOnBoard'));
       setEl('txt-config-btn', t('configBtn'));
       setEl('txt-refresh', t('refresh'));
       setEl('txt-export', t('export'));
@@ -2896,7 +3068,8 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       document.getElementById('gen-time').innerText = data.generated_at;
 
       // Update totals
-      document.getElementById('total-accounts').innerHTML = `${{data.accounts.length}} <span class="stat-unit">${{t('unitProfiles')}}</span>`;
+      const boardAccounts = data.accounts.filter(acc => acc.show_on_dashboard !== false);
+      document.getElementById('total-accounts').innerHTML = `${{boardAccounts.length}} <span class="stat-unit">${{t('unitProfiles')}}</span>`;
       document.getElementById('usable-count').innerText = data.totals.usable_accounts || 0;
       document.getElementById('exhausted-count').innerText = data.totals.exhausted_accounts || 0;
       if (document.getElementById('buffer-pct')) {{
@@ -2909,7 +3082,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         autoEl.style.color = isAuto ? 'var(--accent-green)' : 'var(--accent-amber)';
       }}
 
-      const activePidsCount = data.accounts.reduce((sum, a) => sum + (a.active_pids ? a.active_pids.length : 0), 0);
+      const activePidsCount = boardAccounts.reduce((sum, a) => sum + (a.active_pids ? a.active_pids.length : 0), 0);
       const activePidsEl = document.getElementById('active-pids-count');
       if (activePidsEl) {{
         activePidsEl.innerText = activePidsCount;
@@ -2929,9 +3102,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       const container = document.getElementById('accounts-container');
       container.innerHTML = '';
 
-      data.accounts.forEach(acc => {{
+      boardAccounts.forEach(acc => {{
         const usability = acc.usability || {{}};
-        const isExhausted = usability.code === 'WEEKLY_EXHAUSTED';
+        let isExhausted = usability.code === 'WEEKLY_EXHAUSTED';
         const oq = acc.official_quota || {{}};
         const gGroup = (oq.groups && oq.groups.gemini) ? oq.groups.gemini : null;
         const cGroup = (oq.groups && oq.groups.claude_gpt) ? oq.groups.claude_gpt : null;
@@ -2976,6 +3149,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         // 5H bar: also treat as empty when weekly quota is ~0% (< 1%).
         // API may return tiny non-zero fractions (e.g. 0.003) when practically exhausted.
         const isWklyNearZero = gWk && gWk.remainingPct < 1;
+        if (isWklyNearZero) isExhausted = true;
         const show5hAsDisabled = is5hDisabled || isWklyNearZero;
         const bar5hClass = show5hAsDisabled ? 'bar-exhausted' : (pct5hInt <= 10 ? 'bar-exhausted' : (pct5hInt <= 25 ? 'bar-warning' : ''));
         const pct5hClass = show5hAsDisabled ? 'pct-exhausted' : (pct5hInt <= 10 ? 'pct-exhausted' : (pct5hInt <= 25 ? 'pct-warning' : ''));
@@ -2995,8 +3169,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         let statusLabel = usability.label || t('statusReady');
         if (usability.code === 'NOT_AUTH') statusLabel = t('statusNotAuth');
         else if (usability.code === 'REGION_PENDING') statusLabel = t('statusRegion');
-        else if (usability.code === 'WEEKLY_EXHAUSTED') {{
-          // Both Gemini + Claude/GPT exhausted → generic; only Gemini → Gemini-specific
+        else if (usability.code === 'WEEKLY_EXHAUSTED' || isWklyNearZero) {{
+          // Both Gemini + Claude/GPT exhausted → generic; only Gemini → Gemini-specific.
+          // Near-zero weekly (e.g. 0.37%) rounds to 0% and must not stay "可用".
           const bothExhausted = isWklyNearZero && isClaudeWkExhausted;
           statusLabel = bothExhausted ? t('statusExhaustedBoth') : t('statusExhaustedGemini');
         }}
@@ -3305,7 +3480,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       // Setup Combined Activity Tabs (Heatmap + Trend Chart)
       const heatmapTabs = document.getElementById('heatmap-tabs');
       heatmapTabs.innerHTML = `<button class="tab-btn active" id="btn-tab-all" onclick="switchAccountView('all', this)">${{t('allCombined')}}</button>`;
-      data.accounts.forEach(acc => {{
+      boardAccounts.forEach(acc => {{
         const btn = document.createElement('button');
         btn.className = 'tab-btn';
         btn.innerText = `${{t('accTabPrefix')}} ${{acc.id}} (${{acc.name}})`;
@@ -3319,7 +3494,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       // Setup Table Tabs
       const tabsContainer = document.getElementById('account-tabs');
       tabsContainer.innerHTML = `<button class="tab-btn active" id="btn-tab-table-all" onclick="filterTable('all', this)">${{t('allAccTab')}}</button>`;
-      data.accounts.forEach(acc => {{
+      boardAccounts.forEach(acc => {{
         const btn = document.createElement('button');
         btn.className = 'tab-btn';
         btn.innerText = `${{t('accTabPrefix')}} ${{acc.id}} (${{acc.name}})`;
@@ -3329,6 +3504,8 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
 
       // Render Detailed Table
       renderTable(currentTableAccount || 'all');
+      renderAccountAdmin();
+      applyAccountAdminVisibility();
     }}
 
     let currentTrendDimension = 'total';
@@ -3979,6 +4156,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
 
       let rowsCount = 0;
       data.accounts.forEach(acc => {{
+        if (acc.show_on_dashboard === false) return;
         if (filterAcc !== 'all' && acc.name !== filterAcc) return;
 
         acc.conversations.forEach(c => {{
@@ -4301,6 +4479,64 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
     let autoRefreshTimer = null;
     let autoRefreshCountdown = 15;
     let isAutoRefreshEnabled = true;
+
+    let accountAdminOpen = false;
+
+    function applyAccountAdminVisibility() {{
+      const admin = document.getElementById('account-admin');
+      const quota = document.getElementById('quota-view');
+      if (admin) admin.style.display = accountAdminOpen ? 'block' : 'none';
+      if (quota) quota.style.display = accountAdminOpen ? 'none' : '';
+      const btn = document.getElementById('txt-accounts-btn');
+      if (btn) btn.innerText = accountAdminOpen ? t('backToBoard') : t('accountsBtn');
+    }}
+
+    function toggleAccountAdmin() {{
+      accountAdminOpen = !accountAdminOpen;
+      applyAccountAdminVisibility();
+    }}
+
+    function renderAccountAdmin() {{
+      const body = document.getElementById('account-admin-body');
+      if (!body) return;
+      body.innerHTML = '';
+      data.accounts.forEach(acc => {{
+        const sub = acc.subscription || {{}};
+        const tier = sub.label || t('tierUnknown');
+        const restricted = !!(acc.region_restricted || (sub.ineligible || []).indexOf('UNSUPPORTED_LOCATION') >= 0);
+        const code = (acc.usability || {{}}).code;
+        let login = t('loggedIn');
+        if (code === 'NOT_AUTH') login = t('statusNotAuth');
+        else if (code === 'TOKEN_EXPIRED') login = t('statusExpired');
+        else if (code === 'REGION_PENDING') login = t('statusRegion');
+        const tr = document.createElement('tr');
+        const checked = acc.show_on_dashboard !== false ? 'checked' : '';
+        tr.innerHTML = `
+          <td><strong>${{acc.name}}</strong> <span class="mono" style="color:var(--text-muted)">#${{acc.id}}</span></td>
+          <td class="mono" style="font-size:0.75rem">${{acc.email || '-'}}</td>
+          <td><span class="status-tag status-ready">${{tier}}</span></td>
+          <td>${{login}}</td>
+          <td>${{restricted ? t('regionYes') : t('regionNo')}}</td>
+          <td><input type="checkbox" ${{checked}} aria-label="${{acc.name}}" onchange="setDashboardVisibility('${{acc.name}}', this.checked)"></td>
+        `;
+        body.appendChild(tr);
+      }});
+    }}
+
+    async function setDashboardVisibility(name, shown) {{
+      try {{
+        const resp = await fetch('/api/account-visibility', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ name, show_on_dashboard: shown }}),
+        }});
+        const res = await resp.json();
+        if (!res.success) return;
+        await fetchUsageUpdate();
+      }} catch (err) {{
+        // Leave the checkbox; the next refresh reconciles it.
+      }}
+    }}
 
     async function fetchUsageUpdate() {{
       try {{

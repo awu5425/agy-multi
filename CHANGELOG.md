@@ -5,10 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.2] - 2026-09-23
+## [1.2.0] - 2026-09-23
+
+### Added
+- **订阅档位与账号清单**：额度刷新时额外调用 `loadCodeAssist`，在账号清单里显示 Free / Pro / Ultra。清单里可以勾选哪些账号进入额度看板；未单独设置时，地区受限账号默认不进看板，也不计入看板上的汇总。令牌到期时间仍只在后台刷新，不展示给用户。
 
 ### Fixed
-- 个别账号的额度显示与进度条颜色曾和实际状态不符，现已修正。
+- **近零周额仍显示可用**：官方配额常在周额实际耗尽后留下不足 1% 的余量（例如 0.37%，页面四舍五入为 0%）。可用性判断与看板状态原先只把 `remainingFraction == 0` 视为耗尽，于是状态仍写成「可用 (周: 0% | 5H: 100%)」。现在与进度条一致，周额低于 1% 即视为耗尽，不再标成可用，也不会被选为接力目标。
+- **Dashboard 双版本数据不同步**：`usage_dashboard.html`（静态快照）的 `window.onload` 改为 `async`，页面打开时立即调用 `/api/usage` 覆盖旧硬编码快照数据，消除昨日数据残留（个别账号的额度与进度条颜色和实际状态不符）。`agy_multi/usage.py` 动态模板同步相同修复，确保两个版本行为一致。
 - **Gemini 5H 进度条颜色语义错误**：当 `show5hAsDisabled=true`（因 Gemini 周额耗尽导致 5H bucket 被停用）时，进度条颜色从灰色（`fill-disabled`，易误认为"未登录"）改为红色（`fill-red`），与账号未认证状态明确区分。修复同时应用于 `usage_dashboard.html` 和 `agy_multi/usage.py`。
 
 ### Added

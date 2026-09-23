@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from .manager import ProfileManager
-from .usage import get_profile_usage
+from .usage import bucket_is_depleted, get_profile_usage
 from .utils import (
     sync_profile_environment,
     find_process_running_conversation,
@@ -79,7 +79,7 @@ class SessionRunner:
                 gemini_q = oq.get("groups", {}).get("gemini", {}).get("buckets", {})
                 g_5h = gemini_q.get("gemini-5h")
                 g_wk = gemini_q.get("gemini-weekly")
-                if (g_5h and g_5h.get("disabled")) or (g_wk and g_wk.get("remainingFraction", 1.0) == 0):
+                if (g_5h and g_5h.get("disabled")) or bucket_is_depleted(g_wk):
                     g_5h_rem = 0.0
                 else:
                     g_5h_rem = float(g_5h.get("remainingPct", 100)) if g_5h else 100.0
@@ -163,7 +163,7 @@ class SessionRunner:
                 gemini_q = oq.get("groups", {}).get("gemini", {}).get("buckets", {})
                 g_5h = gemini_q.get("gemini-5h")
                 g_wk = gemini_q.get("gemini-weekly")
-                if (g_5h and g_5h.get("disabled")) or (g_wk and g_wk.get("remainingFraction", 1.0) == 0):
+                if (g_5h and g_5h.get("disabled")) or bucket_is_depleted(g_wk):
                     g_5h_rem = 0.0
                 else:
                     g_5h_rem = float(g_5h.get("remainingPct", 100)) if g_5h else 100.0

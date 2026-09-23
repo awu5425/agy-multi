@@ -177,6 +177,11 @@ def test_manager_config(tmp_path):
     with pytest.raises(ValueError, match="on_no_target must be one of"):
         mgr.update_config(on_no_target="invalid_action")
 
+    mgr.add_profile("board", "board@example.com")
+    updated = mgr.set_show_on_dashboard("board", False)
+    assert updated["show_on_dashboard"] is False
+    assert mgr.find_profile("board")["show_on_dashboard"] is False
+
 
 def test_sensitive_directories_excluded_from_symlink(tmp_path):
     mock_home = tmp_path / "home"

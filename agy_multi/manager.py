@@ -253,6 +253,26 @@ class ProfileManager:
         self._save_registry(registry)
         return target
 
+    def set_show_on_dashboard(self, identifier: str, shown: bool) -> Dict[str, Any]:
+        """Remember whether this profile's quota is drawn on the dashboard."""
+        registry = self._load_registry()
+        profiles = registry.get("profiles", [])
+        target = None
+        target_idx = -1
+        identifier = str(identifier).strip().lower()
+        for idx, p in enumerate(profiles):
+            if str(p.get("id")).lower() == identifier or p.get("name", "").lower() == identifier:
+                target = p
+                target_idx = idx
+                break
+        if target is None:
+            raise ValueError(f"Profile '{identifier}' not found.")
+        target["show_on_dashboard"] = bool(shown)
+        profiles[target_idx] = target
+        registry["profiles"] = profiles
+        self._save_registry(registry)
+        return target
+
 
     def import_existing_token(self, profile_identifier: str) -> bool:
         """Imports host's active token into the specified profile if valid."""
@@ -460,7 +480,7 @@ class ProfileManager:
         exclude_p = self.find_profile(exclude_identifier) if exclude_identifier else None
         exclude_name = exclude_p["name"] if exclude_p else None
 
-        from .usage import get_profile_usage
+        from .usage import bucket_is_depleted, get_profile_usage
 
         candidates = []
         for p in profiles:
@@ -488,7 +508,7 @@ class ProfileManager:
             gemini_q = oq.get("groups", {}).get("gemini", {}).get("buckets", {})
             g_5h = gemini_q.get("gemini-5h")
             g_wk = gemini_q.get("gemini-weekly")
-            if (g_5h and g_5h.get("disabled")) or (g_wk and g_wk.get("remainingFraction", 1.0) == 0):
+            if (g_5h and g_5h.get("disabled")) or bucket_is_depleted(g_wk):
                 continue
             g_5h_rem = float(g_5h.get("remainingPct", 100)) if g_5h else 100.0
             if g_5h_rem <= min_buffer_pct:

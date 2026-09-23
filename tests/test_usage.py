@@ -159,6 +159,135 @@ def test_usability_and_relay_target_eligibility(tmp_path):
     assert "地区受限" in u_region["usability"]["target_ineligible_reason"]
 
 
+def test_near_zero_weekly_is_not_available(tmp_path, monkeypatch):
+    """0.37% weekly still displays as 0% and must not be labeled available."""
+    import json
+    from agy_multi.usage import get_profile_usage
+
+    pdir = tmp_path / "myway"
+    cli_dir = pdir / ".gemini" / "antigravity-cli"
+    cli_dir.mkdir(parents=True)
+    (cli_dir / "antigravity-oauth-token").write_text(json.dumps({
+        "token": {"access_token": "ya29.ok", "expiry": "2099-01-01T00:00:00Z"}
+    }), encoding="utf-8")
+
+    def fake_quota(_pdir):
+        return {
+            "available": True,
+            "groups": {
+                "gemini": {"buckets": {
+                    "gemini-weekly": {"remainingFraction": 0.0036693, "remainingPct": 0.37, "disabled": False},
+                    "gemini-5h": {"remainingFraction": 1.0, "remainingPct": 100.0, "disabled": False},
+                }},
+                "claude_gpt": {"buckets": {
+                    "3p-weekly": {"remainingFraction": 0.000654, "remainingPct": 0.07, "disabled": False},
+                    "3p-5h": {"remainingFraction": 0.0, "remainingPct": 0.0, "disabled": False},
+                }},
+            },
+        }
+
+    monkeypatch.setattr("agy_multi.usage.fetch_official_quota", fake_quota)
+    usage = get_profile_usage({
+        "id": "3",
+        "name": "myway",
+        "email": "myway@example.com",
+        "auth": {"is_valid": True},
+        "active_pids": [],
+        "profile_dir": str(pdir),
+    })
+    assert usage["usability"]["code"] == "WEEKLY_EXHAUSTED"
+    assert usage["usability"]["is_usable"] is False
+    assert usage["usability"]["is_target_eligible"] is False
+    assert "可用" not in usage["usability"]["label"]
+
+    def fake_low_but_usable(_pdir):
+        data = fake_quota(_pdir)
+        data["groups"]["gemini"]["buckets"]["gemini-weekly"] = {
+            "remainingFraction": 0.05, "remainingPct": 5.0, "disabled": False,
+        }
+        data["groups"]["claude_gpt"]["buckets"]["3p-weekly"] = {
+            "remainingFraction": 0.5, "remainingPct": 50.0, "disabled": False,
+        }
+        return data
+
+    monkeypatch.setattr("agy_multi.usage.fetch_official_quota", fake_low_but_usable)
+    still_low = get_profile_usage({
+        "id": "3",
+        "name": "myway",
+        "email": "myway@example.com",
+        "auth": {"is_valid": True},
+        "active_pids": [],
+        "profile_dir": str(pdir),
+    })
+    assert still_low["usability"]["code"] == "LOW_WEEKLY"
+    assert still_low["usability"]["is_usable"] is True
+
+
+def test_subscription_tier_and_dashboard_visibility():
+    from agy_multi.usage import profile_on_dashboard, subscription_from_load_code_assist
+
+    assert profile_on_dashboard({}) is True
+    assert profile_on_dashboard({"region_restricted": True}) is False
+    assert profile_on_dashboard({"region_restricted": True, "show_on_dashboard": True}) is True
+    assert profile_on_dashboard({"show_on_dashboard": False}) is False
+
+    assert subscription_from_load_code_assist({
+        "paidTier": {"id": "g1-pro-tier", "name": "Google AI Pro"},
+        "currentTier": {"id": "free-tier"},
+    })["tier"] == "PRO"
+    assert subscription_from_load_code_assist({
+        "currentTier": {"id": "free-tier", "name": "Antigravity Starter Quota"},
+    })["tier"] == "FREE"
+    assert subscription_from_load_code_assist({
+        "paidTier": {"id": "g1-ultra-tier"},
+    })["tier"] == "ULTRA"
+    assert subscription_from_load_code_assist({})["tier"] == "FREE"
+    assert subscription_from_load_code_assist(None)["tier"] is None
+    blocked = subscription_from_load_code_assist({
+        "currentTier": {"id": "free-tier"},
+        "ineligibleTiers": [{"reasonCode": "UNSUPPORTED_LOCATION"}],
+    })
+    assert "UNSUPPORTED_LOCATION" in blocked["ineligible"]
+
+
+def test_hidden_account_skipped_in_dashboard_totals(tmp_path, monkeypatch):
+    from agy_multi.manager import ProfileManager
+    from agy_multi.usage import get_all_usage
+
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    mgr = ProfileManager(base_dir=tmp_path / "profiles", real_home=mock_home)
+    mgr.add_profile("shown", "shown@example.com")
+    mgr.add_profile("hidden", "hidden@example.com")
+    mgr.set_show_on_dashboard("hidden", False)
+
+    zeros = {
+        "requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0,
+        "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+    }
+
+    def fake_usage(profile, current_ts=None, min_buffer_pct=0.0):
+        shown = profile.get("show_on_dashboard", True)
+        stats = dict(zeros)
+        stats["requests"] = 2 if shown else 9
+        return {
+            "name": profile["name"],
+            "usability": {"is_usable": True, "code": "READY"},
+            "stats_5h": stats,
+            "stats_7d": dict(zeros),
+            "stats_all": dict(zeros),
+            "calendar_stats": {},
+            "show_on_dashboard": shown,
+        }
+
+    monkeypatch.setattr("agy_multi.usage.get_profile_usage", fake_usage)
+    data = get_all_usage(mgr)
+    assert data["totals"]["usable_accounts"] == 1
+    assert data["totals"]["stats_5h"]["requests"] == 2
+    names = {a["name"]: a["show_on_dashboard"] for a in data["accounts"]}
+    assert names == {"shown": True, "hidden": False}
+
+
 def test_no_builtin_oauth_secrets():
     """Repository must not ship built-in OAuth client id/secret material."""
     import agy_multi.usage as usage_mod

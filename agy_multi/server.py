@@ -270,6 +270,34 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(err_bytes)
 
+        elif self.path == "/api/account-visibility":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+                payload = json.loads(body.decode("utf-8"))
+                identifier = payload.get("name") or payload.get("id")
+                if identifier is None or "show_on_dashboard" not in payload:
+                    raise ValueError("name and show_on_dashboard are required")
+                updated = self.manager.set_show_on_dashboard(identifier, bool(payload.get("show_on_dashboard")))
+                encoded = json.dumps(
+                    {"success": True, "name": updated.get("name"), "show_on_dashboard": bool(updated.get("show_on_dashboard"))},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self._send_cors_headers()
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+            except Exception as e:
+                err_bytes = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self._send_cors_headers()
+                self.send_header("Content-Length", str(len(err_bytes)))
+                self.end_headers()
+                self.wfile.write(err_bytes)
+
         elif self.path == "/api/config":
             try:
                 content_length = int(self.headers.get("Content-Length", 0))
