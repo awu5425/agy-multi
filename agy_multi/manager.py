@@ -8,6 +8,7 @@ import sys
 import json
 import time
 import fcntl
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -21,6 +22,8 @@ from .utils import (
     inspect_token_file,
     get_profile_active_pids,
     detect_real_home,
+    find_process_running_conversation,
+    set_terminal_pane_title,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -462,6 +465,8 @@ class ProfileManager:
         pdir = self.get_profile_dir(p["name"])
         sync_profile_environment(pdir, self.real_home)
 
+        set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}] (authenticating)")
+
         token_file = self.get_token_path(p["name"])
         if token_file.exists():
             auth = inspect_token_file(token_file)
@@ -469,6 +474,7 @@ class ProfileManager:
             ans = input(f"Do you want to re-authenticate with {p['email']}? [y/N]: ").strip().lower()
             if ans != "y":
                 print("Login cancelled.")
+                set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}]")
                 return False
             # Remove existing token to force OAuth prompt
             token_file.unlink()
@@ -494,9 +500,11 @@ class ProfileManager:
             print(f"Logged-in Email: {BOLD}{logged_email}{RESET}")
             if logged_email and p["email"] and logged_email.lower() != p["email"].lower():
                 print(f"{YELLOW}Note: Logged-in email ({logged_email}) differs from registered target ({p['email']}).{RESET}")
+            set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}]")
             return True
         else:
             print(f"\n{RED}✗ Authentication was not completed or failed.{RESET}")
+            set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}] [unauth]")
             return False
 
     def get_most_recent_conversation(self, profile_name: str) -> Optional[Dict[str, Any]]:
@@ -578,7 +586,8 @@ class ProfileManager:
         self,
         exclude_identifier: Optional[str] = None,
         min_buffer_pct: Optional[float] = None,
-        require_idle: bool = False
+        require_idle: bool = False,
+        require_visible_on_dashboard: bool = False
     ) -> Optional[Dict[str, Any]]:
         """
         Intelligently finds the best target profile to relay a conversation to:
@@ -587,7 +596,8 @@ class ProfileManager:
         3. Excludes exclude_identifier (source profile).
         4. Excludes profiles where 5H quota <= min_buffer_pct (reserve quota threshold).
         5. If require_idle=True, excludes profiles with active_pids > 0.
-        6. Prioritizes profiles with READY status and lowest active load / highest quota.
+        6. If require_visible_on_dashboard=True, excludes profiles hidden from dashboard.
+        7. Prioritizes profiles with READY status and lowest active load / highest quota.
         """
         if min_buffer_pct is None:
             min_buffer_pct = float(self.get_config().get("min_buffer_pct", 0.0))
@@ -596,11 +606,13 @@ class ProfileManager:
         exclude_p = self.find_profile(exclude_identifier) if exclude_identifier else None
         exclude_name = exclude_p["name"] if exclude_p else None
 
-        from .usage import bucket_is_depleted, get_profile_usage
+        from .usage import bucket_is_depleted, get_profile_usage, profile_on_dashboard
 
         candidates = []
         for p in profiles:
             if exclude_name and p["name"] == exclude_name:
+                continue
+            if require_visible_on_dashboard and not profile_on_dashboard(p):
                 continue
             if not p.get("auth", {}).get("is_valid", False):
                 continue
@@ -878,4 +890,411 @@ class ProfileManager:
         # 4. Launch in target profile
         args = ["--conversation", info["conversation_id"]] + (agy_args or [])
         return self.run_profile(dst_profile["name"], args, exec_replace=exec_replace)
+
+    # ---------------------------------------------------------
+    # Active Supervisor Session Tracking & In-Place Relay IPC
+    # ---------------------------------------------------------
+
+    def _get_supervisors_file(self) -> Path:
+        return self.base_dir / "active_supervisors.json"
+
+    def register_active_supervisor(
+        self,
+        pid: int,
+        profile_name: str,
+        profile_id: Any,
+        conversation_id: Optional[str] = None,
+        pane_info: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Registers a running SessionRunner supervisor session."""
+        sup_file = self._get_supervisors_file()
+        lock_file = self.base_dir / "supervisors.lock"
+        with open(lock_file, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                data = {}
+                if sup_file.is_file():
+                    try:
+                        data = json.loads(sup_file.read_text(encoding="utf-8"))
+                    except Exception:
+                        data = {}
+
+                # Prune stale PIDs
+                active_data = {}
+                for spid_str, info in data.items():
+                    try:
+                        spid = int(spid_str)
+                        os.kill(spid, 0)
+                        active_data[spid_str] = info
+                    except (OSError, ValueError):
+                        pass
+
+                active_data[str(pid)] = {
+                    "pid": pid,
+                    "profile_name": profile_name,
+                    "profile_id": profile_id,
+                    "conversation_id": conversation_id or "",
+                    "started_at": time.time(),
+                    "pane_info": pane_info or {}
+                }
+
+                tmp_file = sup_file.with_suffix(".tmp")
+                tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
+                tmp_file.replace(sup_file)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
+    def unregister_active_supervisor(self, pid: int) -> None:
+        """Removes a SessionRunner supervisor session upon termination."""
+        sup_file = self._get_supervisors_file()
+        lock_file = self.base_dir / "supervisors.lock"
+        with open(lock_file, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                if sup_file.is_file():
+                    try:
+                        data = json.loads(sup_file.read_text(encoding="utf-8"))
+                        if str(pid) in data:
+                            del data[str(pid)]
+                            tmp_file = sup_file.with_suffix(".tmp")
+                            tmp_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                            tmp_file.replace(sup_file)
+                    except Exception:
+                        pass
+                # Also clean any leftover relay command file for this pid
+                cmd_file = self.base_dir / f"relay_cmd_{pid}.json"
+                if cmd_file.is_file():
+                    try:
+                        cmd_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
+    def find_active_supervisor(
+        self,
+        profile_identifier: Optional[str] = None,
+        conversation_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Locates an active supervisor process matching conversation_id or profile."""
+        sup_file = self._get_supervisors_file()
+        if not sup_file.is_file():
+            return None
+
+        lock_file = self.base_dir / "supervisors.lock"
+        with open(lock_file, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                try:
+                    data = json.loads(sup_file.read_text(encoding="utf-8"))
+                except Exception:
+                    return None
+
+                target_p = self.find_profile(profile_identifier) if profile_identifier else None
+                target_p_name = target_p["name"] if target_p else (str(profile_identifier) if profile_identifier else None)
+
+                active_data = {}
+                matched_supervisor = None
+
+                for spid_str, info in data.items():
+                    try:
+                        spid = int(spid_str)
+                        os.kill(spid, 0)
+                        active_data[spid_str] = info
+
+                        # 1. Match by conversation_id if provided
+                        if conversation_id and info.get("conversation_id") == conversation_id:
+                            matched_supervisor = info
+                        # 2. Match by profile name/id if not yet matched by conversation
+                        elif not matched_supervisor and target_p_name:
+                            if info.get("profile_name") == target_p_name or str(info.get("profile_id")) == str(profile_identifier):
+                                matched_supervisor = info
+                    except (OSError, ValueError):
+                        pass
+
+                # If pruning removed any entries, save cleaned active_data
+                if len(active_data) != len(data):
+                    try:
+                        tmp_file = sup_file.with_suffix(".tmp")
+                        tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
+                        tmp_file.replace(sup_file)
+                    except Exception:
+                        pass
+
+                return matched_supervisor
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
+    def dispatch_relay_to_supervisor(
+        self,
+        target_pid: int,
+        target_profile: str,
+        conversation_id: str
+    ) -> bool:
+        """Dispatches an in-place relay command to an active SessionRunner supervisor via SIGUSR1."""
+        try:
+            os.kill(target_pid, 0)
+        except OSError:
+            return False
+
+        cmd_file = self.base_dir / f"relay_cmd_{target_pid}.json"
+        try:
+            cmd_data = {
+                "target_profile": target_profile,
+                "conversation_id": conversation_id,
+                "timestamp": time.time()
+            }
+            tmp_cmd = cmd_file.with_suffix(".tmp")
+            tmp_cmd.write_text(json.dumps(cmd_data, ensure_ascii=False), encoding="utf-8")
+            tmp_cmd.replace(cmd_file)
+
+            os.kill(target_pid, signal.SIGUSR1)
+            return True
+        except Exception:
+            try:
+                cmd_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return False
+
+    @staticmethod
+    def _read_proc_environ(pid: int) -> Dict[str, str]:
+        """Safely reads environment variables of a process from /proc/<pid>/environ."""
+        env = {}
+        try:
+            env_file = Path(f"/proc/{pid}/environ")
+            if env_file.is_file():
+                raw = env_file.read_bytes()
+                for part in raw.split(b"\x00"):
+                    if b"=" in part:
+                        k, v = part.split(b"=", 1)
+                        env[k.decode("utf-8", errors="ignore")] = v.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        return env
+
+    def get_conversation_workspace_paths(self, conversation_id: str) -> List[str]:
+        """Finds candidate workspace directories associated with a conversation_id."""
+        paths = set()
+        if not conversation_id:
+            return []
+
+        registry = self._load_registry()
+        for p in registry.get("profiles", []):
+            pdir = self.get_profile_dir(p["name"])
+            sum_db = pdir / ".gemini" / "antigravity-cli" / "conversation_summaries.db"
+            if sum_db.is_file():
+                try:
+                    conn = sqlite3.connect(f"file:{sum_db.resolve()}?mode=ro", uri=True, timeout=2.0)
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT workspace_uris FROM conversation_summaries WHERE conversation_id = ? LIMIT 1;",
+                        (conversation_id,)
+                    )
+                    row = cur.fetchone()
+                    conn.close()
+                    if row and row[0]:
+                        try:
+                            uris = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                            if isinstance(uris, list):
+                                for u in uris:
+                                    if str(u).startswith("file://"):
+                                        paths.add(str(u)[7:])
+                                    else:
+                                        paths.add(str(u))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        try:
+            cwd = os.getcwd()
+            if cwd:
+                paths.add(cwd)
+        except Exception:
+            pass
+
+        return list(paths)
+
+    def dispatch_relay_to_multiplexer(
+        self,
+        from_identifier: Optional[str],
+        target_profile: str,
+        conversation_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Tier 2 Fallback: Injects relay command directly into active Herdr or Tmux terminal pane.
+        Used when no SessionRunner supervisor is registered for the conversation.
+        """
+        if not conversation_id:
+            return None
+
+        target_p = self.find_profile(target_profile)
+        target_name = target_p["name"] if target_p else str(target_profile)
+        target_id = str(target_p["id"]) if target_p else ""
+
+        from_p = self.find_profile(from_identifier) if from_identifier else None
+        from_name = from_p["name"] if from_p else (str(from_identifier) if from_identifier else "")
+        from_id = str(from_p["id"]) if from_p else ""
+
+        # Determine shortcut or multi command string
+        if target_id and shutil.which(f"agy-{target_id}"):
+            cmd_str = f"agy-{target_id} --conversation {conversation_id}"
+        elif target_name and shutil.which(f"agy-{target_name}"):
+            cmd_str = f"agy-{target_name} --conversation {conversation_id}"
+        else:
+            cmd_str = f"agy-multi run {target_id or target_name} --conversation {conversation_id}"
+
+        pane_title = f"agy: {target_name} [P{target_id}] • {conversation_id[:8]}"
+        candidate_paths = self.get_conversation_workspace_paths(conversation_id)
+
+        # 1. Scan for any running OS process associated with this conversation
+        running_proc = find_process_running_conversation(conversation_id)
+        running_herdr_pane = None
+        running_tmux_pane = None
+        if running_proc:
+            pid = running_proc.get("pid")
+            if pid:
+                env_vars = self._read_proc_environ(pid)
+                running_herdr_pane = env_vars.get("HERDR_PANE_ID")
+                running_tmux_pane = env_vars.get("TMUX_PANE")
+
+        # 2. Check Herdr
+        if shutil.which("herdr"):
+            try:
+                res = subprocess.run(
+                    ["herdr", "pane", "list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout)
+                    panes = data.get("result", {}).get("panes", [])
+                    scored_panes = []
+                    for p in panes:
+                        pid_val = p.get("pane_id")
+                        if not pid_val:
+                            continue
+                        score = 0
+                        # Priority 1: Exact PID environment match
+                        if running_herdr_pane and pid_val == running_herdr_pane:
+                            score += 1000
+                        # Priority 2: Herdr agent_session exact value
+                        agent_sess = p.get("agent_session")
+                        if isinstance(agent_sess, dict) and agent_sess.get("value") == conversation_id:
+                            score += 500
+                        # Priority 3: Label or terminal_title contains conversation id prefix
+                        lbl = str(p.get("label", ""))
+                        title = str(p.get("terminal_title", ""))
+                        if conversation_id[:8] in lbl or conversation_id[:8] in title:
+                            score += 200
+                        # Priority 4: From profile in label/title
+                        if from_name and (from_name in lbl or from_name in title):
+                            score += 100
+                        if from_id and f"[P{from_id}]" in lbl:
+                            score += 100
+                        # Priority 5: CWD matches conversation workspace
+                        cwd = p.get("cwd") or p.get("foreground_cwd")
+                        if cwd and cwd in candidate_paths:
+                            score += 50
+                        # Priority 6: Focused pane bonus
+                        if p.get("focused") is True:
+                            score += 20
+
+                        if score >= 50:
+                            scored_panes.append((score, pid_val))
+
+                    if scored_panes:
+                        scored_panes.sort(key=lambda x: x[0], reverse=True)
+                        target_pane_id = scored_panes[0][1]
+
+                        # Gracefully terminate old running process if any to unlock SQLite WAL
+                        if running_proc and running_proc.get("pid"):
+                            try:
+                                os.kill(running_proc["pid"], signal.SIGINT)
+                            except OSError:
+                                pass
+
+                        # Send C-c to clear prompt
+                        subprocess.run(["herdr", "pane", "send-keys", target_pane_id, "C-c"], capture_output=True, timeout=3)
+                        time.sleep(0.3)
+                        # Inject command and press enter (avoids bracketed paste issue)
+                        subprocess.run(["herdr", "pane", "send-text", target_pane_id, cmd_str], capture_output=True, timeout=3)
+                        subprocess.run(["herdr", "pane", "send-keys", target_pane_id, "enter"], capture_output=True, timeout=3)
+                        # Rename pane and tab
+                        subprocess.run(["herdr", "pane", "rename", target_pane_id, pane_title], capture_output=True, timeout=3)
+                        target_tab_id = next((p.get("tab_id") for p in panes if p.get("pane_id") == target_pane_id), None)
+                        if target_tab_id:
+                            subprocess.run(["herdr", "tab", "rename", target_tab_id, pane_title], capture_output=True, timeout=3)
+
+                        return {
+                            "multiplexer": "herdr",
+                            "pane_id": target_pane_id,
+                            "command": cmd_str,
+                            "title": pane_title
+                        }
+            except Exception:
+                pass
+
+        # 3. Check Tmux
+        if shutil.which("tmux"):
+            try:
+                res = subprocess.run(
+                    ["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_current_path}\t#{pane_title}\t#{pane_active}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    scored_panes = []
+                    for line in res.stdout.splitlines():
+                        parts = line.strip().split("\t")
+                        if len(parts) < 5:
+                            continue
+                        tpane_id, ttarget, tpath, ttitle, tact = parts[0], parts[1], parts[2], parts[3], parts[4]
+                        score = 0
+                        if running_tmux_pane and (tpane_id == running_tmux_pane or ttarget == running_tmux_pane):
+                            score += 1000
+                        if conversation_id[:8] in ttitle:
+                            score += 200
+                        if from_name and from_name in ttitle:
+                            score += 100
+                        if from_id and f"[P{from_id}]" in ttitle:
+                            score += 100
+                        if tpath and tpath in candidate_paths:
+                            score += 50
+                        if tact == "1":
+                            score += 20
+
+                        if score >= 50:
+                            scored_panes.append((score, tpane_id))
+
+                    if scored_panes:
+                        scored_panes.sort(key=lambda x: x[0], reverse=True)
+                        target_pane_id = scored_panes[0][1]
+
+                        if running_proc and running_proc.get("pid"):
+                            try:
+                                os.kill(running_proc["pid"], signal.SIGINT)
+                            except OSError:
+                                pass
+
+                        subprocess.run(["tmux", "send-keys", "-t", target_pane_id, "C-c"], capture_output=True, timeout=3)
+                        time.sleep(0.3)
+                        subprocess.run(["tmux", "send-keys", "-t", target_pane_id, cmd_str, "Enter"], capture_output=True, timeout=3)
+                        subprocess.run(["tmux", "select-pane", "-t", target_pane_id, "-T", pane_title], capture_output=True, timeout=3)
+
+                        return {
+                            "multiplexer": "tmux",
+                            "pane_id": target_pane_id,
+                            "command": cmd_str,
+                            "title": pane_title
+                        }
+            except Exception:
+                pass
+
+        return None
+
+
 

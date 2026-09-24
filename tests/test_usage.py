@@ -51,6 +51,19 @@ def test_render_html_dashboard():
     assert "多账号监控看板" in html
     assert "dimension-selector" in html
     assert "th-cached" in html
+    assert "showClaude5hAsDisabled = isClaude5hDisabled || isClaudeWkExhausted;" in html
+    assert "fillClaude5hClass = 'fill-red'" in html
+    assert "table-expand-wrapper" in html
+    assert "toggleTableExpand" in html
+    assert "displayConvos = tableExpanded ? allConvos : allConvos.slice(0, 10);" in html
+    assert "showMoreConvos" in html
+    assert "relayDisabledIdle" in html
+    assert "!acc.active_pids || acc.active_pids.length === 0" in html
+    assert "btn-relay-quick.disabled" in html
+    assert "relay-anim-container" in html
+    assert "relay-beam-track" in html
+    assert "relay-beam-spark" in html
+
 
 
 def test_parse_step_metadata_with_cached_tokens():
@@ -343,3 +356,24 @@ def test_fetch_official_quota_refresh_missing_env(tmp_path, monkeypatch):
     reason = result.get("reason", "")
     assert "AGY_OAUTH_CLIENT" in reason
     assert "环境变量" in reason or "缺少" in reason
+
+
+def test_claude_and_gemini_5h_disabled_when_weekly_depleted():
+    """Weekly quota depletion (< 1%) must trigger 5H disabled display in both HTML and CLI logic."""
+    from agy_multi.usage import bucket_is_depleted, render_html_dashboard
+
+    # Depleted test cases (< 1% threshold or disabled flag)
+    assert bucket_is_depleted({"remainingPct": 0.8, "disabled": False}) is True
+    assert bucket_is_depleted({"remainingPct": 0.37, "disabled": False}) is True
+    assert bucket_is_depleted({"remainingPct": 0.0, "disabled": False}) is True
+    assert bucket_is_depleted({"remainingPct": 100.0, "disabled": True}) is True
+    assert bucket_is_depleted({"remainingPct": 1.0, "disabled": False}) is False
+    assert bucket_is_depleted({"remainingPct": 99.0, "disabled": False}) is False
+    assert bucket_is_depleted(None) is False
+
+    # HTML dashboard logic must contain Claude 5H disabling & red fill
+    html = render_html_dashboard({"accounts": [], "totals": {"stats_5h": {}, "stats_7d": {}, "stats_all": {}}})
+    assert "showClaude5hAsDisabled = isClaude5hDisabled || isClaudeWkExhausted;" in html
+    assert "fillClaude5hClass = 'fill-red'" in html
+    assert "showClaude5hAsDisabled ? t('disabledStatus')" in html
+

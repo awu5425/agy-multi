@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .manager import ProfileManager
-from .utils import BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET, load_env_config, detect_real_home
+from .utils import BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET, load_env_config, detect_real_home, set_terminal_pane_title
+
 
 
 def format_table(rows: List[List[str]], headers: List[str]) -> str:
@@ -197,7 +198,7 @@ def cmd_status(manager: ProfileManager, args: argparse.Namespace) -> int:
 
 
 def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
-    from .usage import get_all_usage, render_html_dashboard, save_html_dashboard
+    from .usage import get_all_usage, render_html_dashboard, save_html_dashboard, bucket_is_depleted
 
     data = get_all_usage(manager)
 
@@ -290,10 +291,12 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
         g_wk = g_buckets.get("gemini-weekly")
         c_wk = c_buckets.get("3p-weekly")
 
-        def fmt_rem(b):
+        is_g_wk_depleted = bucket_is_depleted(g_wk)
+
+        def fmt_rem(b, is_disabled_by_parent=False):
             if not b or not oq.get("available"):
                 return "-"
-            if b.get("disabled"):
+            if b.get("disabled") or is_disabled_by_parent:
                 return f"{RED}Disabled{RESET}"
             pct = f"{b.get('remainingPct', 100):.1f}%"
             reset_ts = b.get("resetTs")
@@ -309,7 +312,7 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
                     return f"{pct} ({h}h {m}m)"
             return pct
 
-        g_5h_str = fmt_rem(g_5h)
+        g_5h_str = fmt_rem(g_5h, is_disabled_by_parent=is_g_wk_depleted)
         g_wk_str = fmt_rem(g_wk)
         c_wk_str = fmt_rem(c_wk)
 
@@ -385,7 +388,7 @@ def cmd_config(manager: ProfileManager, args: argparse.Namespace) -> int:
 
 
 def cmd_relay(manager: ProfileManager, args: argparse.Namespace, remaining_args: List[str]) -> int:
-    from .usage import get_profile_usage
+    from .usage import get_profile_usage, bucket_is_depleted
 
     min_buffer = getattr(args, "min_buffer", None)
     if min_buffer is None:
@@ -426,9 +429,10 @@ def cmd_relay(manager: ProfileManager, args: argparse.Namespace, remaining_args:
             g_wk = oq.get("groups", {}).get("gemini", {}).get("buckets", {}).get("gemini-weekly")
             c_wk = oq.get("groups", {}).get("claude_gpt", {}).get("buckets", {}).get("3p-weekly")
 
-            g_5h_pct = float(g_5h.get("remainingPct", 100)) if g_5h else 100.0
+            g_5h_disabled = bool((g_5h and g_5h.get("disabled")) or bucket_is_depleted(g_wk))
+            g_5h_pct = 0.0 if g_5h_disabled else (float(g_5h.get("remainingPct", 100)) if g_5h else 100.0)
             g_wk_pct = float(g_wk.get("remainingPct", 100)) if g_wk else 100.0
-            g_5h_str = f"{g_5h_pct:.1f}%" if g_5h else "-"
+            g_5h_str = f"{RED}Disabled{RESET}" if g_5h_disabled else (f"{g_5h_pct:.1f}%" if g_5h else "-")
             g_wk_str = f"{g_wk_pct:.1f}%" if g_wk else "-"
             c_wk_str = f"{c_wk.get('remainingPct', 100):.1f}%" if c_wk else "-"
             pids_str = ", ".join(map(str, p.get("active_pids", []))) if p.get("active_pids") else "idle"
@@ -537,6 +541,7 @@ def cmd_relay(manager: ProfileManager, args: argparse.Namespace, remaining_args:
         return 0
 
     print(f"🚀 {BOLD}Resuming conversation with Profile {dst_profile['id']} ({dst_profile['name']})...{RESET}\n")
+    set_terminal_pane_title(f"agy: {dst_profile['name']} [P{dst_profile['id']}] • {cid[:8]}")
     cmd_args = ["--conversation", cid] + remaining_args
     return manager.run_profile(dst_profile["name"], cmd_args, exec_replace=True)
 
@@ -556,11 +561,25 @@ def cmd_run(manager: ProfileManager, args: argparse.Namespace, remaining_args: L
             print(f"Please run first: {BOLD}{CYAN}agy-multi login {profile['id']}{RESET}")
             return 1
 
+        set_terminal_pane_title(f"agy: {profile['name']} [P{profile['id']}]")
+
     # If --direct is specified, bypass supervisor and execvpe directly
     if getattr(args, "direct", False) or "--direct" in remaining_args:
         clean_args = [a for a in remaining_args if a != "--direct"]
         fallback_p = manager.get_active_or_recent_profile() or (manager.list_profiles()[0] if manager.list_profiles() else None)
         target_name = profile["name"] if profile else (fallback_p["name"] if fallback_p else "")
+        target_obj = manager.find_profile(target_name)
+        if target_obj:
+            cid = None
+            for i, a in enumerate(clean_args):
+                if a in ("--conversation", "-c") and i + 1 < len(clean_args):
+                    cid = clean_args[i + 1]
+                    break
+                if a.startswith("--conversation="):
+                    cid = a.split("=", 1)[1]
+                    break
+            title_suffix = f" • {cid[:8]}" if cid else ""
+            set_terminal_pane_title(f"agy: {target_obj['name']} [P{target_obj['id']}]{title_suffix}")
         return manager.run_profile(target_name, clean_args, exec_replace=True)
 
     # Otherwise run with SessionRunner (includes quota buffer watchdog and auto-relay)
@@ -695,13 +714,44 @@ def cmd_creds(manager: ProfileManager, args: argparse.Namespace) -> int:
 
 
 
+def cmd_use(manager: ProfileManager, args: argparse.Namespace) -> int:
+    """Explicitly sets the current terminal pane & tab title to represent a specific profile."""
+    profile = manager.find_profile(args.identifier)
+    if not profile:
+        print(f"{RED}Error: Profile '{args.identifier}' not found.{RESET}")
+        print("Run `agy-multi list` to see available profiles.")
+        return 1
+
+    status_tag = ""
+    auth_status = profile.get("auth", {})
+    if not auth_status.get("is_valid"):
+        status_tag = " [unauth]"
+
+    new_title = f"agy: {profile['name']} [P{profile['id']}]{status_tag}"
+    set_terminal_pane_title(new_title)
+
+    print(f"\n{GREEN}{BOLD}✓ Terminal Pane & Tab Title Updated:{RESET} {BOLD}{new_title}{RESET}")
+    print(f"  Account  : [{profile['id']}] {profile['name']} ({profile['email']})")
+    if auth_status.get("is_valid"):
+        print(f"  Auth     : {GREEN}● Logged In{RESET}")
+    else:
+        print(f"  Auth     : {RED}○ Not Logged In{RESET} (run: agy-multi login {profile['id']})")
+    print(f"  Shortcuts: {CYAN}agy-{profile['id']}{RESET} or {CYAN}agy-{profile['name']}{RESET}\n")
+    return 0
+
+
 def cmd_login(manager: ProfileManager, args: argparse.Namespace) -> int:
     profile = manager.find_profile(args.identifier)
     if not profile:
         print(f"{RED}Error: Profile '{args.identifier}' not found.{RESET}")
         return 1
 
+    set_terminal_pane_title(f"agy: {profile['name']} [P{profile['id']}] (authenticating)")
     success = manager.login_profile(args.identifier)
+    if success:
+        set_terminal_pane_title(f"agy: {profile['name']} [P{profile['id']}]")
+    else:
+        set_terminal_pane_title(f"agy: {profile['name']} [P{profile['id']}] [unauth]")
     return 0 if success else 1
 
 
@@ -1041,9 +1091,13 @@ def main():
     p_run.add_argument("--direct", action="store_true", help="Bypass supervisor and directly execvpe into agy")
     p_run.add_argument("--on-no-target", choices=["pause", "burn_buffer"], default=None, help="Fallback behavior when no relay targets are available")
 
-    # login
+    # login / auth
     p_login = subparsers.add_parser("login", aliases=["auth"], help="Trigger Google OAuth authentication for a profile")
     p_login.add_argument("identifier", help="Profile ID, name, or email")
+
+    # use / switch / pane-title
+    p_use = subparsers.add_parser("use", aliases=["switch", "pane-title"], help="Set the current terminal pane & tab title to represent a specific profile")
+    p_use.add_argument("identifier", help="Profile ID, name, or email")
 
     # add
     p_add = subparsers.add_parser("add", help="Add a new profile")
@@ -1172,8 +1226,10 @@ def main():
         sys.exit(cmd_config(manager, args))
     elif args.command == "relay":
         sys.exit(cmd_relay(manager, args, []))
-    elif args.command == "login":
+    elif args.command in ("login", "auth"):
         sys.exit(cmd_login(manager, args))
+    elif args.command in ("use", "switch", "pane-title"):
+        sys.exit(cmd_use(manager, args))
     elif args.command == "add":
         sys.exit(cmd_add(manager, args))
     elif args.command == "clone":

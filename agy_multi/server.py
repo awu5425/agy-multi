@@ -13,13 +13,13 @@ from typing import Optional
 
 try:
     from .manager import ProfileManager
-    from .usage import get_all_usage, get_profile_usage, render_html_dashboard, save_html_dashboard
+    from .usage import get_all_usage, get_profile_usage, render_html_dashboard, save_html_dashboard, profile_on_dashboard
     from .utils import load_env_config
 except (ImportError, ValueError):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from agy_multi.manager import ProfileManager
-    from agy_multi.usage import get_all_usage, get_profile_usage, render_html_dashboard, save_html_dashboard
+    from agy_multi.usage import get_all_usage, get_profile_usage, render_html_dashboard, save_html_dashboard, profile_on_dashboard
     from agy_multi.utils import load_env_config
 
 
@@ -184,6 +184,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 for p in profiles:
                     if from_id and (p["name"] == from_id or str(p["id"]) == str(from_id)):
                         continue
+                    if not profile_on_dashboard(p):
+                        continue
                     if not p.get("auth", {}).get("is_valid", False):
                         continue
                     u = get_profile_usage(p)
@@ -195,7 +197,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                         "official_quota": u.get("official_quota", {}),
                         "active_pids": p.get("active_pids", []),
                     })
-                best = self.manager.find_best_relay_candidate(from_id)
+                best = self.manager.find_best_relay_candidate(from_id, require_visible_on_dashboard=True)
                 res = {
                     "candidates": candidates,
                     "recommended": best["name"] if best else None,
@@ -243,7 +245,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 sync_brain = payload.get("sync_brain", True)
 
                 if not to_id:
-                    best = self.manager.find_best_relay_candidate(from_id)
+                    best = self.manager.find_best_relay_candidate(from_id, require_visible_on_dashboard=True)
                     if not best:
                         raise ValueError("No eligible target profile available with ready quota.")
                     to_id = best["name"]
@@ -254,7 +256,51 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                     conversation_id=cid,
                     sync_brain=sync_brain
                 )
-                encoded = json.dumps({"success": True, "result": result}, ensure_ascii=False).encode("utf-8")
+
+                # Check if there is an active SessionRunner supervisor running this session or profile
+                relayed_cid = result.get("conversation_id")
+                target_p_name = result.get("to_profile")
+                auto_switched = False
+                supervisor_info = None
+
+                active_sup = self.manager.find_active_supervisor(
+                    profile_identifier=from_id,
+                    conversation_id=relayed_cid
+                )
+                if active_sup:
+                    sup_pid = active_sup.get("pid")
+                    if sup_pid and self.manager.dispatch_relay_to_supervisor(
+                        target_pid=sup_pid,
+                        target_profile=target_p_name,
+                        conversation_id=relayed_cid
+                    ):
+                        auto_switched = True
+                        supervisor_info = active_sup
+
+                # Tier 2 Fallback: Multiplexer Terminal Injection
+                if not auto_switched:
+                    mux_res = self.manager.dispatch_relay_to_multiplexer(
+                        from_identifier=from_id,
+                        target_profile=target_p_name,
+                        conversation_id=relayed_cid
+                    )
+                    if mux_res:
+                        auto_switched = True
+                        supervisor_info = {
+                            "type": "multiplexer",
+                            "multiplexer": mux_res.get("multiplexer"),
+                            "pane_id": mux_res.get("pane_id"),
+                            "command": mux_res.get("command"),
+                            "title": mux_res.get("title"),
+                        }
+
+                res_payload = {
+                    "success": True,
+                    "result": result,
+                    "auto_switched": auto_switched,
+                    "supervisor": supervisor_info
+                }
+                encoded = json.dumps(res_payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self._send_cors_headers()

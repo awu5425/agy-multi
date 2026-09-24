@@ -3,12 +3,16 @@ Unit tests for SessionRunner, watchdog intervention, and SQLite backup safety.
 """
 
 import os
+import sys
 import json
 import sqlite3
 import pytest
+
 from pathlib import Path
 from agy_multi.manager import ProfileManager
 from agy_multi.runner import SessionRunner
+from agy_multi.utils import set_terminal_pane_title
+
 
 
 def test_session_runner_extract_cid():
@@ -138,3 +142,132 @@ def test_find_process_running_conversation_and_relay_record(tmp_path):
     assert last_relay["conversation_id"] == cid
     assert last_relay["from_profile"] == "src"
     assert last_relay["to_profile"] == "dst"
+
+
+def test_set_terminal_pane_title_herdr_tmux_ansi(monkeypatch, capsys):
+    calls = []
+
+    def mock_run(cmd, check=False, stdout=None, stderr=None, timeout=None):
+        calls.append(cmd)
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+    monkeypatch.setattr("shutil.which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    # 1. Herdr environment
+    monkeypatch.setenv("HERDR_PANE_ID", "wC:p2")
+    monkeypatch.setenv("HERDR_TAB_ID", "wC:t2")
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    set_terminal_pane_title("test-title-herdr")
+    assert ["/usr/bin/herdr", "pane", "rename", "wC:p2", "test-title-herdr"] in calls
+    assert ["/usr/bin/herdr", "tab", "rename", "wC:t2", "test-title-herdr"] in calls
+
+    # 2. Tmux environment
+    calls.clear()
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    monkeypatch.setenv("TMUX", "1")
+    monkeypatch.setenv("TMUX_PANE", "%5")
+    set_terminal_pane_title("test-title-tmux")
+    assert ["/usr/bin/tmux", "select-pane", "-t", "%5", "-T", "test-title-tmux"] in calls
+
+    # 3. ANSI OSC 2 escape sequence
+    calls.clear()
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    set_terminal_pane_title("test-title-ansi")
+    captured = capsys.readouterr()
+    assert "\033]2;test-title-ansi\007" in captured.out
+
+
+def test_cmd_use_and_login_pane_title(tmp_path, monkeypatch):
+    import argparse
+    from agy_multi.cli import cmd_use, cmd_login
+
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    mgr.add_profile("test_user", "test@example.com", custom_id="3")
+
+    titles_set = []
+    monkeypatch.setattr("agy_multi.cli.set_terminal_pane_title", lambda t: titles_set.append(t))
+    monkeypatch.setattr("agy_multi.manager.set_terminal_pane_title", lambda t: titles_set.append(t))
+
+    # Test cmd_use
+    args = argparse.Namespace(identifier="3")
+    ret = cmd_use(mgr, args)
+    assert ret == 0
+    assert any("agy: test_user [P3]" in t for t in titles_set)
+
+    # Test cmd_login title flow (mock login_profile returning True)
+    titles_set.clear()
+    monkeypatch.setattr(mgr, "login_profile", lambda ident: True)
+    args_login = argparse.Namespace(identifier="test_user")
+    ret_login = cmd_login(mgr, args_login)
+    assert ret_login == 0
+    assert "agy: test_user [P3] (authenticating)" in titles_set
+    assert "agy: test_user [P3]" in titles_set
+
+
+def test_supervisor_registry_and_ipc_dispatch(tmp_path, monkeypatch):
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    mgr.add_profile("src", "src@example.com", custom_id="1")
+    mgr.add_profile("dst", "dst@example.com", custom_id="2")
+
+    current_pid = 999888
+    cid = "cid-super-test-123"
+
+    kill_signals = []
+    def mock_kill(pid, sig):
+        kill_signals.append((pid, sig))
+        return 0
+
+    monkeypatch.setattr("os.kill", mock_kill)
+
+    # Register supervisor
+    mgr.register_active_supervisor(
+        pid=current_pid,
+        profile_name="src",
+        profile_id=1,
+        conversation_id=cid,
+        pane_info={"herdr_pane_id": "wC:p2"}
+    )
+
+    # Find active supervisor by cid
+    sup = mgr.find_active_supervisor(conversation_id=cid)
+    assert sup is not None
+    assert sup["pid"] == current_pid
+    assert sup["profile_name"] == "src"
+    assert sup["pane_info"]["herdr_pane_id"] == "wC:p2"
+
+    # Find active supervisor by profile
+    sup2 = mgr.find_active_supervisor(profile_identifier="src")
+    assert sup2 is not None
+    assert sup2["pid"] == current_pid
+
+    # Dispatch relay to supervisor
+    import signal
+    ok = mgr.dispatch_relay_to_supervisor(
+        target_pid=current_pid,
+        target_profile="dst",
+        conversation_id=cid
+    )
+    assert ok is True
+    assert (current_pid, signal.SIGUSR1) in kill_signals
+
+    cmd_file = mgr.base_dir / f"relay_cmd_{current_pid}.json"
+    assert cmd_file.is_file()
+    cmd_data = json.loads(cmd_file.read_text(encoding="utf-8"))
+    assert cmd_data["target_profile"] == "dst"
+    assert cmd_data["conversation_id"] == cid
+
+    # Unregister supervisor
+    mgr.unregister_active_supervisor(current_pid)
+    assert mgr.find_active_supervisor(conversation_id=cid) is None
+    assert not cmd_file.exists()
+
+

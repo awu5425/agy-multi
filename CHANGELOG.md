@@ -5,7 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] - 2026-09-25
+
+### Added
+- **Web 看板极客流光接力动效 (High-Tech Energy Beam Relay Transfer Animation)**：
+  - 接力弹窗内引入动效状态轨道（`relay-anim-container`）：源账号与目标账号节点自适应发光脉冲（`pulse-src-glow`），配合高能电荷光束（`relay-beam-progress` 与 `relay-beam-spark` ⚡ 粒子抖动）实时展现接力三阶段推进过程（1/3 脑图与 SQLite 上下文热迁移 ➔ 2/3 终端分屏 IPC 调度与续跑注入 ➔ 3/3 目标账号接管成功）。
+  - 接力成功目标节点转为翠绿高亮脉冲（`active`）并呈现成功标识，大幅强化 Web 接力交接仪式感与操作反馈。
+- **终端多路复用器分屏与标签标题全生命周期自动命名 (Full-Lifecycle Terminal Pane & Tab Auto-Naming)**：
+  - 新增 `set_terminal_pane_title` 统一接口，按环境自适应联动分屏管理器：
+    - `Herdr`：双重重命名分屏与标签栏（`herdr pane rename <PANE_ID>` + `herdr tab rename <TAB_ID>`），解决此前仅修改子分屏而顶部 Tab Bar 仍显示旧名称的视觉脱节；
+    - `Tmux / Rmux`：自动识别 `$TMUX` 与 `$TMUX_PANE`，执行 `tmux select-pane -t <pane> -T <title>` 设置分屏标题；
+    - `Universal ANSI / OSC 2`：向终端 `sys.stdout` 发射 `\033]2;<title>\007` 控制序列，原生适配 Orca、WezTerm、Alacritty、GNOME Terminal、iTerm2 等终端模拟器。
+  - **全生命周期账号标识自适应联动**：
+    - **登录/认证时**：`agy-multi login <id>`（或 `auth`）触发时自动打标 `agy: <name> [P<id>] (authenticating)`，成功后转为 `agy: <name> [P<id>]`；
+    - **会话运行时**：`agy-multi run <id>`、`agy-<id>`、`agy-<name>` 启动时打标 `agy: <name> [P<id>] • <cid[:8]>`；
+    - **会话退出时**：退出保留账号标识 `agy: <name> [P<id>] [idle]`，防止会话结束后账号归属信息丢失；
+    - **快捷切换与打标命令**：新增 `agy-multi use <id>`（别名 `switch`, `pane-title`），支持在任意空白分屏快速设定或切换当前分屏绑定的账号标签。
+- **Web 看板一键就地全自动接力 (Dual-Tier In-Place Auto-Relay: Supervisor IPC + Multiplexer Fallback)**：
+  - **Tier 1: Supervisor 进程内温和接管 IPC**（零击键注入风险、跨终端通用）：
+    - `SessionRunner` 启动时自动将 PID、Profile 与分屏上下文登记至 `~/.gemini-profiles/active_supervisors.json`（配合文件排他锁与僵死进程自愈修剪）。
+    - Web 看板点击「确认接力」发起 `/api/relay`，服务端完成会话上下文与脑图安全迁移后，智能探测源分屏活跃 Supervisor，写入接力指令并向其派发 `SIGUSR1` 信号。
+    - 运行中终端的 Supervisor 捕获信号后，向运行中的 `agy` 发送 `SIGINT` 温和安全存盘退出，原地热切换环境变量与分屏标题，并自动拉起 `agy --conversation <cid>` 继续会话，无需人工复制粘贴命令。
+  - **Tier 2: 终端复用器智能注入兜底 (Multiplexer Injection Fallback)**：
+    - 当历史会话未被 Supervisor 托管（如直接启动 `--direct`、升级前旧进程，或 `agy` 已退出至 shell bash prompt）：
+    - 自动根据系统活跃进程 `/proc/<pid>/environ`、`conversation_summaries.db` 工作区路径绑定以及 `Herdr` / `Tmux` 运行中分屏属性（`agent_session`、`label`、`title`、`cwd`、`focused`）智能多级评分，精准命中目标分屏；
+    - 向目标分屏精准调度执行：发送中断清除当前输入行，通过 `send-text` 避免括号粘贴模式（Bracketed Paste Mode）冲突，注入新账号快捷命令（如 `agy-5 --conversation <cid>`）并敲击回车启动，同步刷新分屏标签，实现 100% 全覆盖的无人值守全自动接力。
+  - Web 看板前端与静态快照同步增加 `auto_switched` 状态提示与 i18n 国际化，当指令成功下发到分屏终端时以绿色醒目标识展示分屏自动接续状态与分屏 ID（如 `[分屏: wC:p2]`），完全折叠手动复制框。
+- **Web 看板近期会话明细默认精简 10 条展示与展开/收起联动 (Dashboard Recent Conversations Limiting & Expand)**：
+
+  - 会话列表自适应聚合过滤：统一按最新活跃时间（`last_modified`）倒序排序，确保全账号及各独立账号视图均呈现最新的会话。
+  - 默认仅展示最近 10 条会话记录，避免长会话列表拉垮页面篇幅，显著提升信息密度与阅读体验。
+  - 表格底部新增展开/收起按钮组件（`展开更多会话 (已展示 10 / 共 X 条) ▼` 与 `收起会话 (仅保留最近 10 条) ▲`），支持一键延展查看全部记录并可随时按需收起。
+  - 切换账号 Tab 时自动恢复为精简 10 条视图，并完整覆盖中英文 i18n 国际化。
+- **Web 看板接力候选仅展示在榜账号 (Relay Candidates Hidden Account Filtering)**：
+  - 接力弹窗与候选列表（`openRelayModal` 与 `/api/relay/candidates`）严格过滤隐藏账号（`show_on_dashboard: false`），仅列出在看板上展示且处于登录就绪状态的有效账号，避免未在看板展示的账号干扰接力目标选择。
+  - 自动推荐逻辑（`find_best_relay_candidate`）支持 `require_visible_on_dashboard=True`，杜绝后台将任务自动调度至看板隐藏账号。
+- **Web 看板空闲账号接力按钮智能置灰联动 (Idle Account Relay Button Disabling)**：
+  - 当账号处于空闲状态（无活跃进程 `active_pids` 时），卡片右下角「⚡ 账号接力」按钮及 5H 冷却快捷接力按钮自动置灰禁用（`.disabled` + `cursor: not-allowed`），并展示中英文悬浮提示「账号当前处于空闲状态（无运行中任务），无法发起接力」，杜绝空闲无任务时误点接力。
+  - 前端控制器函数（`openAccountRelay`）增加防御拦截，空闲账号杜绝打开接力弹窗。
+- **跨账号接力自动带入续跑指令与身份宣告 (Auto-Resume Interactive Handoff Execution)**：
+  - 针对接力后新账号仅静默停在 `>` 输入框未自动接跑的问题：在 `SessionRunner` 热切换拉起目标账号时，自动注入 `--prompt-interactive`（`-i`）并带入系统接力提示词（`【系统接力就绪】会话已由系统平滑接力至账号 [xxx] (ID: x)。请检查上一棒执行状态并自动继续推进完成当前任务。`）。
+  - 新账号启动即自动向用户做出交接声明并继续推进任务，彻底消除“后台已换人但终端中断停滞”的断层感。
+
+
+
+
+
+### Fixed
+- **Claude & GPT 5H 进度条语义与停用联动**：当 Claude & GPT 周配额耗尽（< 1%）或 5H bucket 被停用时，5H 进度条同步判定为已停用，进度条颜色由绿变为红色（`fill-red`），胶囊状态与文本显示为「🚫 已停用 (0%)」，消除周额耗尽但 5H 仍显示绿色 100% 的误导问题。修复同时对齐 Web 看板动态服务与静态模板。
+- **CLI 终端配额表格 5H 停用联动**：在 `agy-multi usage` 与 `agy-multi relay` 中，当周配额耗尽时，5H 剩余量明确标示为红字 `Disabled`，不再显示 `100.0%`。
+
+
 
 ## [1.3.0] - 2026-09-24
 

@@ -2009,7 +2009,30 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       margin-bottom: 3rem;
     }}
 
+    .btn-table-expand {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 24px;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--accent-blue);
+      background: rgba(59, 130, 246, 0.08);
+      border: 1px solid rgba(59, 130, 246, 0.25);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }}
+
+    .btn-table-expand:hover {{
+      background: rgba(59, 130, 246, 0.16);
+      border-color: rgba(59, 130, 246, 0.45);
+      transform: translateY(-1px);
+    }}
+
     table {{
+
       width: 100%;
       border-collapse: collapse;
       text-align: left;
@@ -2105,6 +2128,22 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
     .btn-relay-quick:hover {{
       background: rgba(234, 179, 8, 0.35);
       color: #fff;
+    }}
+    .btn-relay-quick.disabled {{
+      background: rgba(255, 255, 255, 0.04) !important;
+      border: 1px solid rgba(255, 255, 255, 0.1) !important;
+      color: var(--text-muted) !important;
+      opacity: 0.4 !important;
+      cursor: not-allowed !important;
+      pointer-events: auto !important;
+      box-shadow: none !important;
+      transform: none !important;
+    }}
+    .btn-relay-quick.disabled:hover {{
+      background: rgba(255, 255, 255, 0.04) !important;
+      border-color: rgba(255, 255, 255, 0.1) !important;
+      color: var(--text-muted) !important;
+      transform: none !important;
     }}
     .modal-overlay {{
       position: fixed;
@@ -2211,6 +2250,127 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
     .btn-copy-cmd:hover {{
       background: var(--accent-blue);
       color: #090d16;
+    }}
+
+    /* Relay Transfer Animation */
+    .relay-anim-container {{
+      margin: 0.75rem 0 1rem 0;
+      padding: 1.1rem 0.85rem;
+      background: radial-gradient(circle at 50% 50%, rgba(15, 23, 42, 0.95), rgba(2, 6, 23, 0.98));
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 12px;
+      box-shadow: 0 0 25px rgba(56, 189, 248, 0.12) inset;
+      position: relative;
+      overflow: hidden;
+      display: none;
+    }}
+    .relay-anim-flex {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: relative;
+      z-index: 2;
+    }}
+    .relay-node {{
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 95px;
+      text-align: center;
+    }}
+    .relay-node-badge {{
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: rgba(30, 41, 59, 0.9);
+      border: 2px solid rgba(56, 189, 248, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      transition: all 0.35s ease;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.2);
+    }}
+    .relay-node-src .relay-node-badge {{
+      border-color: #38bdf8;
+      animation: pulse-src-glow 1.4s infinite alternate ease-in-out;
+    }}
+    .relay-node-dst .relay-node-badge {{
+      border-color: rgba(255, 255, 255, 0.2);
+    }}
+    .relay-node-dst.active .relay-node-badge {{
+      border-color: #34d399;
+      background: rgba(16, 185, 129, 0.2);
+      box-shadow: 0 0 20px rgba(52, 211, 153, 0.7);
+      transform: scale(1.1);
+    }}
+    .relay-node-name {{
+      font-weight: 700;
+      font-size: 0.8125rem;
+      color: #fff;
+      margin-top: 0.4rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }}
+    .relay-node-sub {{
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }}
+    .relay-beam-wrapper {{
+      flex: 1;
+      margin: 0 0.8rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      position: relative;
+    }}
+    .relay-beam-track {{
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      position: relative;
+      overflow: visible;
+    }}
+    .relay-beam-progress {{
+      position: absolute;
+      left: 0;
+      top: 0;
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #38bdf8, #818cf8, #34d399);
+      border-radius: 3px;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.8);
+      transition: width 0.3s ease;
+    }}
+    .relay-beam-spark {{
+      position: absolute;
+      top: -11px;
+      left: 0%;
+      transform: translateX(-50%);
+      font-size: 1.15rem;
+      transition: left 0.3s ease;
+      filter: drop-shadow(0 0 6px #fef08a);
+      animation: spark-wobble 0.7s infinite alternate ease-in-out;
+    }}
+    .relay-beam-msg {{
+      font-size: 0.72rem;
+      color: #cbd5e1;
+      margin-top: 0.65rem;
+      font-weight: 500;
+      text-align: center;
+      min-height: 1.1rem;
+    }}
+    @keyframes pulse-src-glow {{
+      from {{ box-shadow: 0 0 8px rgba(56, 189, 248, 0.2); }}
+      to {{ box-shadow: 0 0 20px rgba(56, 189, 248, 0.6); }}
+    }}
+    @keyframes spark-wobble {{
+      from {{ transform: translateX(-50%) rotate(-6deg) scale(0.95); }}
+      to {{ transform: translateX(-50%) rotate(6deg) scale(1.1); }}
     }}
 
     /* Switch Toggle */
@@ -2558,7 +2718,13 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           <!-- Injected by JavaScript -->
         </tbody>
       </table>
+      <div id="table-expand-wrapper" style="display: none; padding: 14px; text-align: center; border-top: 1px solid var(--card-border); background: rgba(15, 23, 42, 0.3);">
+        <button id="btn-table-expand" class="btn-table-expand" onclick="toggleTableExpand()">
+          <span id="btn-table-expand-text">展开更多会话</span>
+        </button>
+      </div>
     </div>
+
     </div>
   </div>
 
@@ -2648,8 +2814,18 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         relayTargetLabel: "选择接力目标账号:",
         relayBtnSubmit: "⚡ 确认接力",
         relayClose: "关闭",
+        relayAnimSrcSub: "交出现场",
+        relayAnimDstSub: "等待接棒",
+        relayAnimMsgReady: "准备接力传输...",
         relaySuccess: "接力成功！",
         relayResumePrompt: "请在终端运行以下命令继续会话:",
+        relayAutoSwitchedMsg: "接力指令已直接送达终端！会话正在当前分屏自动接续，无需手动执行命令。",
+        relayAutoSwitchedSub: "守护进程（SessionRunner）已自动完成上下文热迁移并切换配额账号。",
+        showMoreConvos: "展开更多会话 (已展示 10 / 共 {{total}} 条) ▼",
+        showLessConvos: "收起会话 (仅保留最近 10 条) ▲",
+
+
+
         relayAutoPick: "★ 智能推荐 (算力最充裕)",
         relayCooldownHint: "5H配额告急，建议接力到空闲账号",
         relayAutoRefreshTitle: "自动刷新",
@@ -2733,6 +2909,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         relayDisabledNotAuth: "未登录，无法发起接力",
         relayDisabledExpired: "凭证已过期，无法发起接力",
         relayDisabledRegion: "地区受限，无法发起接力",
+        relayDisabledIdle: "账号当前处于空闲状态（无运行中任务），无法发起接力",
         relayDisabledNoConvo: "无活跃会话记录，无法接力",
         relayNoTargetBtn: "无可接力目标",
         relayNoTargetTitle: "当前无可用的接力目标账号",
@@ -2829,8 +3006,18 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         relayTargetLabel: "Select Target Profile:",
         relayBtnSubmit: "⚡ Execute Relay",
         relayClose: "Close",
+        relayAnimSrcSub: "Source Active",
+        relayAnimDstSub: "Target Ready",
+        relayAnimMsgReady: "Preparing relay handoff...",
         relaySuccess: "Relay Successful!",
         relayResumePrompt: "Run the following command in terminal to continue:",
+        relayAutoSwitchedMsg: "Relay command dispatched to terminal! Session is automatically resuming in-place.",
+        relayAutoSwitchedSub: "SessionRunner supervisor has hot-migrated the context and switched account profile.",
+        showMoreConvos: "Show more conversations (showing 10 of {{total}}) ▼",
+        showLessConvos: "Collapse conversations (show recent 10) ▲",
+
+
+
         relayAutoPick: "★ Auto-Recommended (Highest Quota)",
         relayCooldownHint: "5H Low • Ready to Relay",
         relayAutoRefreshTitle: "Auto-refresh",
@@ -2884,6 +3071,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         relayDisabledNotAuth: "Not logged in, cannot relay",
         relayDisabledExpired: "Token expired, cannot relay",
         relayDisabledRegion: "Region restricted, cannot relay",
+        relayDisabledIdle: "Account is idle (no running task), cannot relay",
         relayDisabledNoConvo: "No active conversations to relay",
         relayNoTargetBtn: "No Target Available",
         relayNoTargetTitle: "No Eligible Target Accounts",
@@ -3022,6 +3210,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       setEl('lbl-relay-target', t('relayTargetLabel'));
       setEl('btn-relay-submit', t('relayBtnSubmit'));
       setEl('btn-relay-cancel', t('relayClose'));
+      setEl('relay-anim-src-sub', t('relayAnimSrcSub'));
+      setEl('relay-anim-dst-sub', t('relayAnimDstSub'));
+      setEl('relay-beam-msg', t('relayAnimMsgReady'));
 
       setEl('txt-policy-modal-title', t('policyModalTitle'));
       setEl('txt-config-modal-title', t('configModalTitle'));
@@ -3167,6 +3358,11 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         const pctClaude5h = isNotAuth ? 0 : (c5h ? c5h.remainingPct : 100);
         const pctClaude5hInt = Math.round(pctClaude5h);
 
+        // Claude 5H bar: also treat as disabled/exhausted when Claude weekly quota is ~0% (< 1%).
+        const showClaude5hAsDisabled = isClaude5hDisabled || isClaudeWkExhausted;
+        const barClaude5hClass = showClaude5hAsDisabled ? 'bar-exhausted' : (pctClaude5hInt <= 10 ? 'bar-exhausted' : (pctClaude5hInt <= 25 ? 'bar-warning' : ''));
+        const pctClaude5hClass = showClaude5hAsDisabled ? 'pct-exhausted' : (pctClaude5hInt <= 10 ? 'pct-exhausted' : (pctClaude5hInt <= 25 ? 'pct-warning' : ''));
+
         // Status tag label localization (Weekly first, 5H second)
         let statusLabel = usability.label || t('statusReady');
         if (usability.code === 'NOT_AUTH') statusLabel = t('statusNotAuth');
@@ -3301,9 +3497,13 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         // 4. Claude & GPT 5H Capsule (ROW 2: 5H)
         let fillClaude5hClass = 'fill-green';
         let trackClaude5hClass = 'track-green';
-        if (isAccountDisabled || isClaude5hDisabled) {{
+        if (isAccountDisabled) {{
           fillClaude5hClass = 'fill-disabled';
           trackClaude5hClass = 'track-disabled';
+        }} else if (showClaude5hAsDisabled) {{
+          // Weekly quota exhausted or 5h disabled → show red (not gray) to signal exhaustion, not "not authenticated"
+          fillClaude5hClass = 'fill-red';
+          trackClaude5hClass = 'track-red';
         }} else if (pctClaude5hInt <= 10) {{
           fillClaude5hClass = 'fill-red';
           trackClaude5hClass = 'track-red';
@@ -3321,7 +3521,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           <span>${{t('statusNotAuth')}}</span>
         ` : (isTokenExpired ? `
           <span>${{t('relayDisabledExpired')}}</span>
-        ` : (isClaude5hDisabled ? `
+        ` : (showClaude5hAsDisabled ? `
           <span>🚫</span> <span>${{t('disabledStatus')}}</span>
         ` : (c5h && c5h.resetTs && pctClaude5hInt < 100 ? `
           <span>⏳</span> <strong class="countdown-time mono" data-reset-ts="${{c5h.resetTs || 0}}">...</strong>
@@ -3349,6 +3549,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         }} else if (usability.code === 'REGION_PENDING') {{
           canInitiateRelay = false;
           relayDisabledReason = t('relayDisabledRegion');
+        }} else if (!acc.active_pids || acc.active_pids.length === 0) {{
+          canInitiateRelay = false;
+          relayDisabledReason = t('relayDisabledIdle');
         }} else if (!acc.conversations || acc.conversations.length === 0) {{
           canInitiateRelay = false;
           relayDisabledReason = t('relayDisabledNoConvo');
@@ -3430,15 +3633,15 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             </div>
 
             <!-- 2. Claude & GPT 5H Limit Remaining (5H SECOND) -->
-            <div class="capsule-meter" title="Claude & GPT 5H: ${{isAccountDisabled ? '-' : (isClaude5hDisabled ? t('disabledStatus') : (c5h ? pctClaude5hInt + '%' : (oq.available ? '100%' : '-')))}}${{c5h && c5h.resetTs ? ' • ' + t('exactReleaseTime') + formatExactTime(c5h.resetTs) : ''}}">
+            <div class="capsule-meter" title="Claude & GPT 5H: ${{isAccountDisabled ? '-' : (showClaude5hAsDisabled ? t('disabledStatus') : (c5h ? pctClaude5hInt + '%' : (oq.available ? '100%' : '-')))}}${{c5h && c5h.resetTs ? ' • ' + t('exactReleaseTime') + formatExactTime(c5h.resetTs) : ''}}">
               <div class="capsule-track ${{trackClaude5hClass}}">
-                <div class="capsule-fill ${{fillClaude5hClass}}" style="width: ${{isAccountDisabled ? 0 : (isClaude5hDisabled ? 0 : (c5h ? pctClaude5hInt : (oq.available ? 100 : 0)))}}%"></div>
+                <div class="capsule-fill ${{fillClaude5hClass}}" style="width: ${{isAccountDisabled ? 0 : (showClaude5hAsDisabled ? 0 : (c5h ? pctClaude5hInt : (oq.available ? 100 : 0)))}}%"></div>
                 <div class="capsule-content">
                   <span class="capsule-tag">${{t('label5h')}}</span>
                   <div class="capsule-center">
                     ${{cdClaude5hCapsuleHtml}}
                   </div>
-                  <span class="capsule-pct mono">${{isAccountDisabled ? '-' : (isClaude5hDisabled ? '0%' : (c5h ? pctClaude5hInt + '%' : (oq.available ? '100%' : '-')))}}</span>
+                  <span class="capsule-pct mono">${{isAccountDisabled ? '-' : (showClaude5hAsDisabled ? '0%' : (c5h ? pctClaude5hInt + '%' : (oq.available ? '100%' : '-')))}}</span>
                 </div>
               </div>
             </div>
@@ -3467,7 +3670,11 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             <span style="font-size:0.6875rem;color:#fef08a;display:flex;align-items:center;gap:4px">
               <span>⚡</span> <span>${{t('relayCooldownHint')}}</span>
             </span>
+            ${{canInitiateRelay ? `
             <button class="btn-relay-quick" onclick="openAccountRelay('${{acc.name}}')">${{t('btnRelay')}} ➔</button>
+            ` : `
+            <button class="btn-relay-quick disabled" disabled title="${{relayDisabledReason}}">${{t('btnRelay')}} ➔</button>
+            `}}
           </div>
           ` : ''}}
 
@@ -4143,10 +4350,18 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
     }}
 
     // ==========================================
-    // Table Filtering
+    // Table Filtering & Pagination
     // ==========================================
+    let tableExpanded = false;
+
+    function toggleTableExpand() {{
+      tableExpanded = !tableExpanded;
+      renderTable(currentTableAccount);
+    }}
+
     function filterTable(filterAcc, clickedBtn) {{
       currentTableAccount = filterAcc;
+      tableExpanded = false;
       document.querySelectorAll('#account-tabs .tab-btn').forEach(b => b.classList.remove('active'));
       if (clickedBtn) {{
         clickedBtn.classList.add('active');
@@ -4158,42 +4373,80 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
     }}
 
     function renderTable(filterAcc) {{
+      currentTableAccount = filterAcc || 'all';
       const tbody = document.getElementById('detailed-table-body');
       if (!tbody) return;
       tbody.innerHTML = '';
 
-      let rowsCount = 0;
+      let allConvos = [];
       data.accounts.forEach(acc => {{
         if (acc.show_on_dashboard === false) return;
         if (filterAcc !== 'all' && acc.name !== filterAcc) return;
 
-        acc.conversations.forEach(c => {{
-          rowsCount++;
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td><strong style="color:var(--accent-blue)">${{acc.name}}</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(ID:${{acc.id}})</span></td>
-            <td>
-              <div style="font-weight:600;color:#fff">${{c.title}}</div>
-              <div class="mono" style="font-size:0.6875rem;color:var(--text-muted)">${{c.id}}</div>
-            </td>
-            <td class="mono" style="font-size:0.75rem">${{c.last_modified ? c.last_modified.slice(0, 19).replace('T', ' ') : '-'}}</td>
-            <td class="mono"><strong>${{c.requests}}</strong></td>
-            <td class="mono">${{formatNumber(c.prompt_tokens)}}</td>
-            <td class="mono" style="color:#c084fc">${{formatNumber(c.cached_tokens || 0)}}</td>
-            <td class="mono" style="color:var(--accent-purple)">${{formatNumber(c.thinking_tokens)}}</td>
-            <td class="mono" style="color:var(--accent-green)">${{formatNumber(c.output_tokens)}}</td>
-            <td class="mono"><strong style="color:#fff">${{formatNumber(c.total_tokens)}}</strong></td>
-          `;
-          tbody.appendChild(tr);
+        (acc.conversations || []).forEach(c => {{
+          allConvos.push({{
+            accName: acc.name,
+            accId: acc.id,
+            ...c
+          }});
         }});
       }});
 
-      if (rowsCount === 0) {{
+      // Sort by last_modified descending (most recent first)
+      allConvos.sort((a, b) => {{
+        const ta = a.last_modified || '';
+        const tb = b.last_modified || '';
+        return tb.localeCompare(ta);
+      }});
+
+      const totalCount = allConvos.length;
+      const displayConvos = tableExpanded ? allConvos : allConvos.slice(0, 10);
+
+      displayConvos.forEach(c => {{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><strong style="color:var(--accent-blue)">${{c.accName}}</strong> <span style="font-size:0.75rem;color:var(--text-muted)">(ID:${{c.accId}})</span></td>
+          <td>
+            <div style="font-weight:600;color:#fff">${{c.title || 'Untitled'}}</div>
+            <div class="mono" style="font-size:0.6875rem;color:var(--text-muted)">${{c.id}}</div>
+          </td>
+          <td class="mono" style="font-size:0.75rem">${{c.last_modified ? c.last_modified.slice(0, 19).replace('T', ' ') : '-'}}</td>
+          <td class="mono"><strong>${{c.requests || 0}}</strong></td>
+          <td class="mono">${{formatNumber(c.prompt_tokens || 0)}}</td>
+          <td class="mono" style="color:#c084fc">${{formatNumber(c.cached_tokens || 0)}}</td>
+          <td class="mono" style="color:var(--accent-purple)">${{formatNumber(c.thinking_tokens || 0)}}</td>
+          <td class="mono" style="color:var(--accent-green)">${{formatNumber(c.output_tokens || 0)}}</td>
+          <td class="mono"><strong style="color:#fff">${{formatNumber(c.total_tokens || 0)}}</strong></td>
+        `;
+        tbody.appendChild(tr);
+      }});
+
+      if (totalCount === 0) {{
         const tr = document.createElement('tr');
         tr.innerHTML = `<td colspan="9" style="text-align:center;padding:2rem;color:var(--text-muted)">${{t('noRecords')}}</td>`;
         tbody.appendChild(tr);
       }}
+
+      // Expand / Collapse button handling
+      const expandWrapper = document.getElementById('table-expand-wrapper');
+      const expandBtnText = document.getElementById('btn-table-expand-text');
+      if (expandWrapper) {{
+        if (totalCount > 10) {{
+          expandWrapper.style.display = 'block';
+          if (tableExpanded) {{
+            const label = t('showLessConvos') || '收起会话 (仅保留最近 10 条) ▲';
+            if (expandBtnText) expandBtnText.innerText = label;
+          }} else {{
+            const template = t('showMoreConvos') || '展开更多会话 (已展示 10 / 共 {{total}} 条) ▼';
+            if (expandBtnText) expandBtnText.innerText = template.replace('{{total}}', totalCount);
+
+          }}
+        }} else {{
+          expandWrapper.style.display = 'none';
+        }}
+      }}
     }}
+
 
     // ==========================================
     // Real-Time Countdowns Ticker
@@ -4262,14 +4515,28 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       document.getElementById('modal-relay-from-text').innerText = srcName;
       document.getElementById('modal-relay-convo-text').innerText = `${{title}} (${{cid.slice(0, 8)}}...)`;
       document.getElementById('relay-result-box').style.display = 'none';
+      const animBox = document.getElementById('relay-anim-container');
+      if (animBox) {{
+        animBox.style.display = 'none';
+        const prog = document.getElementById('relay-beam-progress');
+        const spark = document.getElementById('relay-beam-spark');
+        const dstNode = document.getElementById('relay-node-dst');
+        if (prog) prog.style.width = '0%';
+        if (spark) spark.style.left = '0%';
+        if (dstNode) dstNode.classList.remove('active');
+      }}
+      const cmdContainer = document.getElementById('relay-cmd-container');
+      if (cmdContainer) cmdContainer.style.display = 'flex';
       const submitBtn = document.getElementById('btn-relay-submit');
       submitBtn.style.display = 'inline-block';
+      submitBtn.disabled = false;
 
-      // Populate candidate accounts
+
+      // Populate candidate accounts (only accounts visible on dashboard)
       const listContainer = document.getElementById('modal-relay-candidates-list');
       listContainer.innerHTML = '';
 
-      const candidates = data.accounts.filter(a => a.name !== srcName);
+      const candidates = data.accounts.filter(a => a.name !== srcName && a.show_on_dashboard !== false);
       if (!candidates.length) {{
         listContainer.innerHTML = `<div style="padding:1.5rem;text-align:center;color:var(--text-muted);font-size:0.8rem">${{t('noOtherAccounts')}}</div>`;
         submitBtn.disabled = true;
@@ -4420,6 +4687,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
 
     function openAccountRelay(srcName) {{
       const acc = data.accounts.find(a => a.name === srcName);
+      if (!acc || !acc.active_pids || acc.active_pids.length === 0) return;
       const convos = acc ? acc.conversations : [];
       const cid = convos.length ? convos[0].id : '';
       const title = convos.length ? (convos[0].title || 'Active Session') : 'Current Task';
@@ -4434,7 +4702,33 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       if (!selectedTargetName) return;
       const submitBtn = document.getElementById('btn-relay-submit');
       submitBtn.disabled = true;
-      submitBtn.innerText = 'Relaying...';
+      submitBtn.innerText = currentLang === 'zh' ? '正在接力...' : 'Relaying...';
+
+      const animBox = document.getElementById('relay-anim-container');
+      const progressEl = document.getElementById('relay-beam-progress');
+      const sparkEl = document.getElementById('relay-beam-spark');
+      const msgEl = document.getElementById('relay-beam-msg');
+      const dstNode = document.getElementById('relay-node-dst');
+      const dstIcon = document.getElementById('relay-anim-dst-icon');
+
+      if (animBox) {{
+        document.getElementById('relay-anim-src-name').innerText = currentRelayFrom;
+        document.getElementById('relay-anim-dst-name').innerText = selectedTargetName;
+        dstNode.classList.remove('active');
+        dstIcon.innerText = '🎯';
+        animBox.style.display = 'block';
+        progressEl.style.width = '25%';
+        sparkEl.style.left = '25%';
+        msgEl.innerText = currentLang === 'zh' ? '1/3: 正在同步会话上下文与历史脑图 (SQLite & Brain)...' : '1/3: Syncing conversation context & brain index...';
+
+        setTimeout(() => {{
+          if (progressEl && progressEl.style.width !== '100%') {{
+            progressEl.style.width = '65%';
+            sparkEl.style.left = '65%';
+            msgEl.innerText = currentLang === 'zh' ? '2/3: 正在向终端分屏派发温和交接信号与续跑指令...' : '2/3: Dispatching handoff signal & auto-resume prompt...';
+          }}
+        }}, 200);
+      }}
 
       try {{
         const resp = await fetch('/api/relay', {{
@@ -4449,24 +4743,59 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         }});
         const json = await resp.json();
         if (json.success) {{
+          if (animBox) {{
+            progressEl.style.width = '100%';
+            sparkEl.style.left = '100%';
+            dstNode.classList.add('active');
+            dstIcon.innerText = '✓';
+            msgEl.innerText = currentLang === 'zh' ? '3/3: 接力交接已完成！目标账号已就绪接管。' : '3/3: Handover complete! Target profile ready.';
+          }}
+
           const resBox = document.getElementById('relay-result-box');
           resBox.style.display = 'block';
           const cmdText = `agy-${{selectedTargetId}} --conversation ${{currentRelayCid}}`;
           document.getElementById('relay-cmd-text').innerText = cmdText;
-          document.getElementById('relay-status-msg').innerHTML = `✓ ${{t('relaySuccess')}}<br><span style="color:#cbd5e1">${{t('relayResumePrompt')}}</span>`;
+          const cmdContainer = document.getElementById('relay-cmd-container');
+
+          if (json.auto_switched) {{
+            const paneId = (json.supervisor && json.supervisor.pane_id) ||
+                           (json.supervisor && json.supervisor.pane_info && (json.supervisor.pane_info.herdr_pane_id || json.supervisor.pane_info.tmux_pane)) ||
+                           '';
+            const paneNotice = paneId ? ` [分屏: ${{paneId}}]` : '';
+            const subMsg = (json.supervisor && json.supervisor.type === 'multiplexer')
+              ? (currentLang === 'zh' ? '终端多路复用器已就地注入接力启动指令并刷新分屏标签。' : 'Multiplexer injected relay command and refreshed pane label.')
+              : t('relayAutoSwitchedSub');
+            document.getElementById('relay-status-msg').innerHTML =
+              `<div style="font-weight:600;font-size:0.85rem;color:#34d399;margin-bottom:4px;">⚡ ${{t('relayAutoSwitchedMsg')}}${{paneNotice}}</div>` +
+              `<div style="color:#94a3b8;font-size:0.75rem;line-height:1.4;">${{subMsg}}</div>`;
+            if (cmdContainer) cmdContainer.style.display = 'none';
+          }} else {{
+            document.getElementById('relay-status-msg').innerHTML = `✓ ${{t('relaySuccess')}}<br><span style="color:#cbd5e1">${{t('relayResumePrompt')}}</span>`;
+            if (cmdContainer) cmdContainer.style.display = 'flex';
+          }}
           submitBtn.style.display = 'none';
         }} else {{
+          if (animBox) animBox.style.display = 'none';
           alert('Relay failed: ' + (json.error || 'Unknown error'));
           submitBtn.disabled = false;
           submitBtn.innerText = t('relayBtnSubmit');
         }}
       }} catch (err) {{
+        if (animBox) {{
+          progressEl.style.width = '100%';
+          sparkEl.style.left = '100%';
+          dstNode.classList.add('active');
+          dstIcon.innerText = '✓';
+          msgEl.innerText = currentLang === 'zh' ? '离线模式：已就地生成接力启动指令。' : 'Offline mode: relay command generated.';
+        }}
         // Fallback in static view: generate command
         const resBox = document.getElementById('relay-result-box');
         resBox.style.display = 'block';
         const cmdText = `agy-multi relay ${{currentRelayCid}} --from ${{currentRelayFrom}} --to ${{selectedTargetName}}`;
         document.getElementById('relay-cmd-text').innerText = cmdText;
         document.getElementById('relay-status-msg').innerHTML = `ℹ️ ${{t('relayResumePrompt')}}`;
+        const cmdContainer = document.getElementById('relay-cmd-container');
+        if (cmdContainer) cmdContainer.style.display = 'flex';
         submitBtn.style.display = 'none';
       }}
     }}
@@ -4719,11 +5048,34 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         <!-- Injected by JS -->
       </div>
 
+      <!-- High-tech Relay Beam Animation -->
+      <div id="relay-anim-container" class="relay-anim-container">
+        <div class="relay-anim-flex">
+          <div class="relay-node relay-node-src">
+            <div class="relay-node-badge" id="relay-anim-src-icon">🏃</div>
+            <div class="relay-node-name" id="relay-anim-src-name">--</div>
+            <div class="relay-node-sub" id="relay-anim-src-sub">交出现场</div>
+          </div>
+          <div class="relay-beam-wrapper">
+            <div class="relay-beam-track">
+              <div class="relay-beam-progress" id="relay-beam-progress"></div>
+              <div class="relay-beam-spark" id="relay-beam-spark">⚡</div>
+            </div>
+            <div class="relay-beam-msg" id="relay-beam-msg">准备接力传输...</div>
+          </div>
+          <div class="relay-node relay-node-dst" id="relay-node-dst">
+            <div class="relay-node-badge" id="relay-anim-dst-icon">🎯</div>
+            <div class="relay-node-name" id="relay-anim-dst-name">--</div>
+            <div class="relay-node-sub" id="relay-anim-dst-sub">等待接棒</div>
+          </div>
+        </div>
+      </div>
+
       <div id="relay-result-box" style="display: none; margin-bottom: 1rem;">
         <div style="padding: 0.75rem; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 8px; font-size: 0.75rem; color: var(--accent-green); margin-bottom: 0.5rem;" id="relay-status-msg">
           ✓ 接力成功！
         </div>
-        <div class="relay-cmd-box">
+        <div class="relay-cmd-box" id="relay-cmd-container">
           <span id="relay-cmd-text" class="mono"></span>
           <button class="btn-copy-cmd" onclick="copyRelayCmd()" id="btn-copy-text">复制</button>
         </div>

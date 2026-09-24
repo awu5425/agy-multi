@@ -3,6 +3,7 @@ Unit tests for agy_multi manager and utils.
 """
 
 import os
+import json
 import tempfile
 import pytest
 from pathlib import Path
@@ -459,3 +460,108 @@ def test_profile_manager_clone_and_inherit(tmp_path):
     report = mgr.inherit_profile_config("prof3", source="prof1")
     assert report["mcp_inherited"] is True
     assert p3_mcp.is_file()
+
+
+def test_dispatch_relay_to_multiplexer_herdr(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    mgr.add_profile("src_acc", "src@example.com")
+    mgr.add_profile("dst_acc", "dst@example.com")
+
+    cid = "test-cid-12345678-abcd"
+    commands_run = []
+
+    def mock_which(cmd):
+        if cmd == "herdr":
+            return "/usr/bin/herdr"
+        if cmd == "agy-2":
+            return "/usr/local/bin/agy-2"
+        return None
+
+    monkeypatch.setattr(shutil, "which", mock_which)
+
+    herdr_output = json.dumps({
+        "result": {
+            "panes": [
+                {
+                    "pane_id": "wC:p2",
+                    "agent_session": {"value": cid},
+                    "label": f"agy: src_acc • {cid[:8]}",
+                    "cwd": str(tmp_path),
+                    "focused": True
+                },
+                {
+                    "pane_id": "w8:p1",
+                    "label": "bash",
+                    "cwd": "/other/dir",
+                    "focused": False
+                }
+            ]
+        }
+    })
+
+    def mock_subprocess_run(cmd, *args, **kwargs):
+        commands_run.append(cmd)
+        if cmd == ["herdr", "pane", "list"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=herdr_output, stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    res = mgr.dispatch_relay_to_multiplexer("src_acc", "dst_acc", cid)
+    assert res is not None
+    assert res["multiplexer"] == "herdr"
+    assert res["pane_id"] == "wC:p2"
+    assert "agy-2 --conversation test-cid-12345678-abcd" in res["command"]
+    assert "dst_acc" in res["title"]
+
+    assert ["herdr", "pane", "send-keys", "wC:p2", "C-c"] in commands_run
+    assert ["herdr", "pane", "send-text", "wC:p2", f"agy-2 --conversation {cid}"] in commands_run
+    assert ["herdr", "pane", "send-keys", "wC:p2", "enter"] in commands_run
+    assert ["herdr", "pane", "rename", "wC:p2", f"agy: dst_acc [P2] • {cid[:8]}"] in commands_run
+
+
+def test_dispatch_relay_to_multiplexer_tmux(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    mgr.add_profile("src_acc", "src@example.com")
+    mgr.add_profile("dst_acc", "dst@example.com")
+
+    cid = "test-tmux-cid-87654321"
+    commands_run = []
+
+    def mock_which(cmd):
+        if cmd == "herdr":
+            return None
+        if cmd == "tmux":
+            return "/usr/bin/tmux"
+        return None
+
+    monkeypatch.setattr(shutil, "which", mock_which)
+
+    tmux_output = f"%1\tmysess:0.0\t{tmp_path}\tagy: src_acc • {cid[:8]}\t1\n%2\tmysess:0.1\t/tmp\tbash\t0\n"
+
+    def mock_subprocess_run(cmd, *args, **kwargs):
+        commands_run.append(cmd)
+        if len(cmd) > 1 and cmd[0] == "tmux" and cmd[1] == "list-panes":
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=tmux_output, stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    res = mgr.dispatch_relay_to_multiplexer("src_acc", "dst_acc", cid)
+    assert res is not None
+    assert res["multiplexer"] == "tmux"
+    assert res["pane_id"] == "%1"
+    assert f"agy-multi run 2 --conversation {cid}" in res["command"]
+
+    assert ["tmux", "send-keys", "-t", "%1", "C-c"] in commands_run
+    assert ["tmux", "send-keys", "-t", "%1", f"agy-multi run 2 --conversation {cid}", "Enter"] in commands_run
+    assert ["tmux", "select-pane", "-t", "%1", "-T", f"agy: dst_acc [P2] • {cid[:8]}"] in commands_run
+

@@ -6,6 +6,7 @@ and seamless in-place relay resumption across isolated profiles.
 
 import os
 import sys
+import json
 import time
 import signal
 import threading
@@ -19,6 +20,7 @@ from .usage import bucket_is_depleted, get_profile_usage
 from .utils import (
     sync_profile_environment,
     find_process_running_conversation,
+    set_terminal_pane_title,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -51,6 +53,35 @@ class SessionRunner:
         self._stop_watchdog = threading.Event()
         self._relay_requested = False
         self._next_profile: Optional[Dict[str, Any]] = None
+        self._external_relay_target: Optional[Dict[str, Any]] = None
+        self._external_relay_cid: Optional[str] = None
+
+    def _handle_sigusr1(self, signum, frame):
+        """Handles external relay dispatch from Web Dashboard or IPC."""
+        cmd_file = self.manager.base_dir / f"relay_cmd_{os.getpid()}.json"
+        if cmd_file.is_file():
+            try:
+                data = json.loads(cmd_file.read_text(encoding="utf-8"))
+                cmd_file.unlink(missing_ok=True)
+                target_name = data.get("target_profile")
+                target_p = self.manager.find_profile(target_name)
+                if target_p:
+                    cid = data.get("conversation_id")
+                    self._external_relay_target = target_p
+                    self._external_relay_cid = cid
+                    self._relay_requested = True
+                    self._next_profile = target_p
+                    self._relay_notice = (
+                        f"⚡ 接收到外部接管指令：由 Web 看板调度接力至账号 "
+                        f"[{target_p['name']} (ID: {target_p['id']})]"
+                    )
+                    if self.child_proc and self.child_proc.poll() is None:
+                        try:
+                            self.child_proc.send_signal(signal.SIGINT)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     def _extract_conversation_id(self, args: List[str]) -> Optional[str]:
         """Extracts --conversation <cid> or -c <cid> from args if present."""
@@ -150,6 +181,27 @@ class SessionRunner:
 
         current_args = list(self.extra_args)
 
+        old_sigusr1 = None
+        try:
+            old_sigusr1 = signal.signal(signal.SIGUSR1, self._handle_sigusr1)
+        except (ValueError, AttributeError):
+            pass
+
+        try:
+            return self._run_loop(curr_profile, current_args)
+        finally:
+            self.manager.unregister_active_supervisor(os.getpid())
+            p_name = curr_profile.get("name", "") if curr_profile else ""
+            p_id = curr_profile.get("id", "") if curr_profile else ""
+            p_tag = f" {p_name} [P{p_id}]" if p_name else ""
+            set_terminal_pane_title(f"agy:{p_tag} [idle]")
+            if old_sigusr1 is not None:
+                try:
+                    signal.signal(signal.SIGUSR1, old_sigusr1)
+                except Exception:
+                    pass
+
+    def _run_loop(self, curr_profile: Dict[str, Any], current_args: List[str]) -> int:
         while True:
             self._stop_watchdog.clear()
             self._relay_requested = False
@@ -201,6 +253,22 @@ class SessionRunner:
                 env["GEMINI_CLI_PROFILE_DIR"] = str(pdir)
 
                 cmd = ["agy"] + current_args
+
+                # Register active supervisor & set terminal pane title
+                cid = getattr(self, "_external_relay_cid", None) or self._extract_conversation_id(current_args)
+                self.manager.register_active_supervisor(
+                    pid=os.getpid(),
+                    profile_name=curr_profile["name"],
+                    profile_id=curr_profile["id"],
+                    conversation_id=cid,
+                    pane_info={
+                        "herdr_pane_id": os.environ.get("HERDR_PANE_ID"),
+                        "herdr_tab_id": os.environ.get("HERDR_TAB_ID"),
+                        "tmux_pane": os.environ.get("TMUX_PANE"),
+                    }
+                )
+                title_suffix = f" • {cid[:8]}" if cid else ""
+                set_terminal_pane_title(f"agy: {curr_profile['name']} [P{curr_profile['id']}]{title_suffix}")
 
                 print(f"{CYAN}==================================================================={RESET}")
                 print(f"{BOLD}🚀 正在启动 Antigravity 会话 [账号: {curr_profile['name']} (ID: {curr_profile['id']})]{RESET}")
@@ -392,7 +460,7 @@ class SessionRunner:
 
                 if target_p["name"] != curr_profile["name"]:
                     # Determine conversation ID to relay
-                    cid = self._extract_conversation_id(current_args)
+                    cid = getattr(self, "_external_relay_cid", None) or self._extract_conversation_id(current_args)
                     if not cid:
                         recent = self.manager.get_most_recent_conversation(curr_profile["name"])
                         cid = recent["id"] if recent else None
@@ -408,9 +476,25 @@ class SessionRunner:
                             print(f"\n{GREEN}[agy-multi] ✅ 会话已成功迁移至账号 [{target_p['name']}] (ID: {target_p['id']}){RESET}")
                             print(f"{CYAN}[agy-multi] ⚡ 正在无缝接续会话 [{cid[:8]}...] 继续工作...{RESET}\n", flush=True)
 
-                            # Update args to continue the same conversation
-                            if "--conversation" not in current_args and "-c" not in current_args:
-                                current_args = ["--conversation", cid] + [a for a in current_args if not a.startswith("--conversation")]
+                            # Update args to continue the same conversation and auto-resume execution
+                            clean_args = []
+                            skip_flag = False
+                            for a in current_args:
+                                if skip_flag:
+                                    skip_flag = False
+                                    continue
+                                if a in ("--conversation", "-c", "-i", "--prompt-interactive", "-p", "--print", "--prompt"):
+                                    skip_flag = True
+                                    continue
+                                if a.startswith(("--conversation=", "--prompt-interactive=", "--prompt=", "--print=")):
+                                    continue
+                                clean_args.append(a)
+
+                            relay_prompt = (
+                                f"【系统接力就绪】会话已由系统平滑接力至账号 [{target_p['name']}] (ID: {target_p['id']})。"
+                                f"请检查上一棒执行状态并自动继续推进完成当前任务。"
+                            )
+                            current_args = ["--conversation", cid, "-i", relay_prompt] + clean_args
                         except Exception as e:
                             print(f"{RED}[agy-multi] 接力迁移失败: {e}{RESET}")
                             return 1
@@ -418,5 +502,9 @@ class SessionRunner:
                         print(f"{YELLOW}[agy-multi] 未找到可迁移的历史会话，切换至新账号启动。{RESET}")
 
                 curr_profile = target_p
+                self._external_relay_target = None
+                self._external_relay_cid = None
                 time.sleep(1.0)
                 continue
+
+

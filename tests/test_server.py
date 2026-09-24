@@ -190,3 +190,140 @@ def test_non_loopback_get_without_token_401(non_loopback_style_server):
     with urllib.request.urlopen(req_cookie) as resp:
         assert resp.status == 200
 
+
+def test_server_post_relay_auto_switched(test_server, monkeypatch):
+    mgr = UsageDashboardHandler.manager
+    mgr.add_profile("src_acc", "src@example.com", custom_id="1")
+    mgr.add_profile("dst_acc", "dst@example.com", custom_id="2")
+
+    cid = "cid-server-auto-relay"
+    src_cli = mgr.get_profile_dir("src_acc") / ".gemini" / "antigravity-cli"
+    convos = src_cli / "conversations"
+    convos.mkdir(parents=True, exist_ok=True)
+    (convos / f"{cid}.db").touch()
+
+    curr_pid = 777666
+    kill_signals = []
+
+    def mock_kill(pid, sig):
+        kill_signals.append((pid, sig))
+        return 0
+
+    monkeypatch.setattr("os.kill", mock_kill)
+
+    # Register active supervisor
+    mgr.register_active_supervisor(
+        pid=curr_pid,
+        profile_name="src_acc",
+        profile_id=1,
+        conversation_id=cid,
+        pane_info={"herdr_pane_id": "wC:p2"}
+    )
+
+    try:
+        post_data = json.dumps({
+            "from": "src_acc",
+            "to": "dst_acc",
+            "conversation_id": cid,
+            "sync_brain": False
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{test_server}/api/relay",
+            data=post_data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer secret-token-123"
+            }
+        )
+        with urllib.request.urlopen(req) as resp:
+            assert resp.status == 200
+            data = json.loads(resp.read().decode("utf-8"))
+            assert data["success"] is True
+            assert data["auto_switched"] is True
+            assert data["supervisor"]["pid"] == curr_pid
+            assert data["supervisor"]["pane_info"]["herdr_pane_id"] == "wC:p2"
+            import signal
+            assert (curr_pid, signal.SIGUSR1) in kill_signals
+    finally:
+        mgr.unregister_active_supervisor(curr_pid)
+
+
+def test_server_post_relay_multiplexer_fallback(test_server, monkeypatch):
+    """Verifies /api/relay falls back to multiplexer injection when no supervisor exists."""
+    mgr = UsageDashboardHandler.manager
+    mgr.add_profile("src_acc2", "src2@example.com")
+    mgr.add_profile("dst_acc2", "dst2@example.com")
+
+    cid = "fallback-cid-44556677"
+    src_cli = mgr.get_profile_dir("src_acc2") / ".gemini" / "antigravity-cli"
+    convos = src_cli / "conversations"
+    convos.mkdir(parents=True, exist_ok=True)
+    (convos / f"{cid}.db").touch()
+
+    # Mock dispatch_relay_to_multiplexer returning injected pane info
+    def mock_dispatch_mux(from_identifier, target_profile, conversation_id):
+        return {
+            "multiplexer": "herdr",
+            "pane_id": "wC:p8",
+            "command": f"agy-2 --conversation {conversation_id}",
+            "title": f"agy: dst_acc2 [P2] • {conversation_id[:8]}"
+        }
+
+    monkeypatch.setattr(mgr, "dispatch_relay_to_multiplexer", mock_dispatch_mux)
+
+    post_data = json.dumps({
+        "from": "src_acc2",
+        "to": "dst_acc2",
+        "conversation_id": cid,
+        "sync_brain": False
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"{test_server}/api/relay",
+        data=post_data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer secret-token-123"
+        }
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["success"] is True
+        assert data["auto_switched"] is True
+        assert data["supervisor"]["type"] == "multiplexer"
+        assert data["supervisor"]["multiplexer"] == "herdr"
+        assert data["supervisor"]["pane_id"] == "wC:p8"
+
+
+def test_server_relay_candidates_excludes_hidden_accounts(test_server, monkeypatch):
+    """Verifies /api/relay/candidates excludes accounts marked show_on_dashboard=False."""
+    mgr = UsageDashboardHandler.manager
+    mgr.add_profile("board_acc", "board@example.com")
+    mgr.add_profile("hidden_acc", "hidden@example.com")
+    mgr.set_show_on_dashboard("hidden_acc", False)
+
+    # Mock auth for both so they would be eligible if not hidden
+    token_board = mgr.get_token_path("board_acc")
+    token_board.write_text("token", encoding="utf-8")
+    token_hidden = mgr.get_token_path("hidden_acc")
+    token_hidden.write_text("token", encoding="utf-8")
+
+    mock_auth = lambda p, **kwargs: {"is_valid": True, "email": "x@x.com", "expired": False}
+    monkeypatch.setattr("agy_multi.manager.inspect_token_file", mock_auth)
+    monkeypatch.setattr("agy_multi.usage.inspect_token_file", mock_auth)
+
+    req = urllib.request.Request(
+        f"{test_server}/api/relay/candidates",
+        headers={"Authorization": "Bearer secret-token-123"}
+    )
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        candidate_names = [c["name"] for c in data.get("candidates", [])]
+        assert "board_acc" in candidate_names
+        assert "hidden_acc" not in candidate_names
+
+
+

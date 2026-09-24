@@ -9,6 +9,7 @@ import json
 import base64
 import time
 import shutil
+import subprocess
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -654,3 +655,88 @@ def find_process_running_conversation(
             continue
 
     return None
+
+
+def set_terminal_pane_title(title: str) -> None:
+    """Sets terminal pane / window title across multiple multiplexers and standard terminals.
+
+    Supports:
+    1. Herdr: `herdr pane rename <HERDR_PANE_ID> <title>` if HERDR_PANE_ID is set.
+    2. Tmux / Rmux: `tmux select-pane -t <TMUX_PANE> -T <title>` if TMUX / TMUX_PANE is set.
+    3. Universal ANSI / OSC 2: `\033]2;<title>\007` to stdout (supports Orca, Xterm, iTerm, WezTerm, etc.).
+    """
+    if not title:
+        return
+
+    # 1. Herdr pane & tab rename
+    herdr_pane_id = os.environ.get("HERDR_PANE_ID")
+    herdr_tab_id = os.environ.get("HERDR_TAB_ID")
+    if herdr_pane_id or herdr_tab_id:
+        herdr_bin = shutil.which("herdr")
+        if herdr_bin:
+            if not herdr_tab_id and herdr_pane_id:
+                try:
+                    r = subprocess.run(
+                        [herdr_bin, "pane", "get", herdr_pane_id],
+                        capture_output=True,
+                        text=True,
+                        timeout=1.0,
+                        check=False
+                    )
+                    if r.returncode == 0 and r.stdout:
+                        p_data = json.loads(r.stdout)
+                        herdr_tab_id = p_data.get("result", {}).get("pane", {}).get("tab_id")
+                except Exception:
+                    pass
+
+            if herdr_pane_id:
+                try:
+                    subprocess.run(
+                        [herdr_bin, "pane", "rename", herdr_pane_id, title],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=1.5,
+                        check=False
+                    )
+                except Exception:
+                    pass
+            if herdr_tab_id:
+                try:
+                    subprocess.run(
+                        [herdr_bin, "tab", "rename", herdr_tab_id, title],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=1.5,
+                        check=False
+                    )
+                except Exception:
+                    pass
+
+    # 2. Tmux / Rmux pane title
+    if os.environ.get("TMUX") or os.environ.get("RMUX"):
+        tmux_bin = shutil.which("tmux") or shutil.which("rmux")
+        if tmux_bin:
+            tmux_pane = os.environ.get("TMUX_PANE")
+            try:
+                cmd = [tmux_bin, "select-pane"]
+                if tmux_pane:
+                    cmd.extend(["-t", tmux_pane])
+                cmd.extend(["-T", title])
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1.5,
+                    check=False
+                )
+            except Exception:
+                pass
+
+    # 3. Universal ANSI / OSC 2 sequence (Orca, WezTerm, Alacritty, GNOME Terminal, etc.)
+    try:
+        if sys.stdout and sys.stdout.isatty():
+            sys.stdout.write(f"\033]2;{title}\007")
+            sys.stdout.flush()
+    except Exception:
+        pass
+
