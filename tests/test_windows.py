@@ -296,6 +296,7 @@ def test_cmd_wt(tmp_path, monkeypatch):
         wt_calls.append(kwargs)
         return True
 
+    monkeypatch.setattr("agy_multi.cli.is_orca_terminal", lambda: False)
     monkeypatch.setattr("agy_multi.cli.launch_windows_terminal", mock_launch_wt)
 
     args = argparse.Namespace(identifier="1", split="v", tab=False)
