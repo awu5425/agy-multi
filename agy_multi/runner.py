@@ -292,6 +292,8 @@ class SessionRunner:
                         "herdr_pane_id": os.environ.get("HERDR_PANE_ID"),
                         "herdr_tab_id": os.environ.get("HERDR_TAB_ID"),
                         "tmux_pane": os.environ.get("TMUX_PANE"),
+                        "orca_terminal_handle": os.environ.get("ORCA_TERMINAL_HANDLE"),
+                        "orca_tab_id": os.environ.get("ORCA_TAB_ID"),
                     }
                 )
                 title_suffix = f" • {cid[:8]}" if cid else ""

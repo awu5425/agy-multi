@@ -1136,16 +1136,25 @@ class ProfileManager:
         pane_title = f"agy: {target_name} [P{target_id}] • {conversation_id[:8]}"
         candidate_paths = self.get_conversation_workspace_paths(conversation_id)
 
-        # 1. Scan for any running OS process associated with this conversation
+        # 1. Scan for any running OS process or active supervisor associated with this conversation
         running_proc = find_process_running_conversation(conversation_id)
         running_herdr_pane = None
         running_tmux_pane = None
+        running_orca_handle = None
+
+        active_sup = self.find_active_supervisor(conversation_id=conversation_id)
+        if active_sup and active_sup.get("pane_info"):
+            running_herdr_pane = active_sup["pane_info"].get("herdr_pane_id")
+            running_tmux_pane = active_sup["pane_info"].get("tmux_pane")
+            running_orca_handle = active_sup["pane_info"].get("orca_terminal_handle")
+
         if running_proc:
             pid = running_proc.get("pid")
             if pid:
                 env_vars = self._read_proc_environ(pid)
-                running_herdr_pane = env_vars.get("HERDR_PANE_ID")
-                running_tmux_pane = env_vars.get("TMUX_PANE")
+                running_herdr_pane = running_herdr_pane or env_vars.get("HERDR_PANE_ID")
+                running_tmux_pane = running_tmux_pane or env_vars.get("TMUX_PANE")
+                running_orca_handle = running_orca_handle or env_vars.get("ORCA_TERMINAL_HANDLE")
 
         # 2. Check Herdr
         if shutil.which("herdr"):
@@ -1306,8 +1315,10 @@ class ProfileManager:
                         if not thandle or not t.get("connected"):
                             continue
                         score = 0
-                        if curr_handle and thandle == curr_handle:
+                        if running_orca_handle and thandle == running_orca_handle:
                             score += 1000
+                        elif curr_handle and thandle == curr_handle:
+                            score += 800
                         ttitle = str(t.get("title") or "")
                         if conversation_id[:8] in ttitle:
                             score += 200

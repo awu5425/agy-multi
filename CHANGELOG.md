@@ -13,11 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - 自动探测 Orca 客户端运行环境（`TERM_PROGRAM=Orca`、`ORCA_TERMINAL_HANDLE`、`ORCA_TAB_ID`、`ORCA_PANE_KEY`、`ORCA_WORKSPACE_ID` 等）；
     - 优先联动调用 Orca 官方 CLI（`orca terminal rename [--terminal <handle>] --title <title>`），实现全生命周期自动同步（登录、会话启动、空闲打标、会话切片、手动 `agy-multi use`）；
     - Windows 下使用 `CREATE_NO_WINDOW` 零闪烁静默调用。
-  - **Orca 原生分屏与标签页启动 (`agy-multi split` / `wt`)**：
-    - 在 Orca 终端下自动优先调用 `orca terminal split --direction vertical|horizontal --command ...` 原生切分窗格；
-    - 支持 `--tab` 参数通过 `orca terminal create --title ... --command ... --focus` 在新标签页秒级拉起账号会话。
+  - **Orca 原生分屏与独立项目标签页 (`agy-multi tab` / `split` / `wt`)**：
+    - 新增头等公民命令 `agy-multi tab [profile] [-p/--project <path>]`（别名 `new-tab`），一键在 Orca 顶部为指定代码仓库/工作区（Worktree）新建独立标签页；
+    - `launch_orca_terminal` 原生对接 Orca Worktree 选择器（`--worktree path:<cwd>`），并在路径非 Orca 工作区时自动降级至 `--worktree active`；
+    - 保留 `agy-multi split [profile] [--split v|h]` 专用于当前终端面板的横纵向分屏；
+    - 针对 Windows Terminal (`wt.exe`) 实现 100% 同等语义参数自适应映射（`-d <path>`）。
   - **Orca 客户端 Tier 2 多路复用器自动接力调度 (Multiplexer Injection Relay)**：
-    - 支持通过 `orca terminal list --json` 智能评分匹配目标窗格（精准权衡 `ORCA_TERMINAL_HANDLE`、会话前缀、账号标识、工作区工作路径）；
+    - 在 `SessionRunner` 启动时自动将 `ORCA_TERMINAL_HANDLE` 与 `ORCA_TAB_ID` 登记至全局活跃 Supervisor 注册表；
+    - 支持通过 `orca terminal list --json` 智能评分匹配目标窗格（精准权衡 `ORCA_TERMINAL_HANDLE` 1000 分满分匹配、会话前缀、账号标识、工作区工作路径）；
     - 支持向目标窗格调度中断（`orca terminal send --terminal <handle> --interrupt`）与注入续跑指令（`orca terminal send --text ... --enter`）并自动改名。
   - **Windows 中文代码页 (GBK / CP936) 编解码鲁棒性修复**：
     - 入口处统一对 `sys.stdout` 与 `sys.stderr` 重置 UTF-8 编码与 `errors="replace"`，彻底根除打印 `✓`、`●` 等特殊 Unicode 字符时的 `UnicodeEncodeError`；

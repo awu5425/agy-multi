@@ -1073,7 +1073,24 @@ def launch_orca_terminal(
             check=False,
             **extra_kwargs
         )
-        return res.returncode == 0
+        if res.returncode == 0:
+            return True
+        # If worktree selector path failed, fallback to active worktree
+        if new_tab and cwd:
+            cmd_fb = [orca_bin, "terminal", "create"]
+            if title:
+                cmd_fb.extend(["--title", title])
+            cmd_fb.extend(["--worktree", "active", "--command", cmd_str, "--focus"])
+            res_fb = subprocess.run(
+                cmd_fb,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3.0,
+                check=False,
+                **extra_kwargs
+            )
+            return res_fb.returncode == 0
+        return False
     except Exception:
         return False
 

@@ -154,7 +154,8 @@ agy-multi login 1                     # 针对指定账号执行 Google OAuth �
 agy-multi add coder coder@ex.com -d "重构负责人"
 agy-multi edit 2 --name coder-pro --email newcoder@ex.com
 agy-multi run [profile]               # 启动账号会话（等同于 agy-auto）
-agy-multi split [profile] [--split v|h] # 在 Orca 或 Windows Terminal 分屏/新标签页中启动
+agy-multi tab [profile] [-p DIR]       # 在 Orca 或 Windows Terminal 新建项目独立标签页启动
+agy-multi split [profile] [--split v|h] # 在 Orca 或 Windows Terminal 分屏窗格中启动
 agy-multi use [profile]               # 将当前终端分屏/标签页重命名为指定账号（别名 title/switch）
 agy-multi relay                       # 智能自动接力当前活跃会话
 agy-multi relay --to 2                # 定向接力至指定账号

@@ -308,6 +308,36 @@ def test_cmd_wt(tmp_path, monkeypatch):
     assert "main" in wt_calls[0]["title"]
 
 
+def test_cmd_tab(tmp_path, monkeypatch):
+    """Verifies cmd_wt behaves as a new tab command when invoked via tab/new-tab."""
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    mgr.add_profile("main", "main@gmail.com", custom_id="1")
+
+    orca_calls = []
+
+    def mock_launch_orca(**kwargs):
+        orca_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr("agy_multi.cli.is_orca_terminal", lambda: True)
+    monkeypatch.setattr("agy_multi.cli.launch_orca_terminal", mock_launch_orca)
+
+    project_dir = tmp_path / "my_project"
+    project_dir.mkdir()
+
+    args = argparse.Namespace(command="tab", identifier="1", project=str(project_dir), split="v")
+    ret = cmd_wt(mgr, args)
+    assert ret == 0
+    assert len(orca_calls) == 1
+    assert orca_calls[0]["new_tab"] is True
+    assert orca_calls[0]["cwd"] == project_dir
+    assert "main" in orca_calls[0]["title"]
+
+
 def test_set_terminal_pane_title():
     """Verifies set_terminal_pane_title executes safely on Windows."""
     set_terminal_pane_title("agy: test-title")
@@ -388,14 +418,31 @@ def test_launch_orca_terminal(monkeypatch):
     call = orca_calls[0]
     assert "horizontal" in call
 
-    # 3. New tab
+    # 3. New tab with project worktree
     orca_calls.clear()
-    ok = launch_orca_terminal(["python", "-m", "agy_multi.cli", "run", "3"], new_tab=True, title="agy: 3")
+    fake_proj = Path("D:/Fake/Project")
+    ok = launch_orca_terminal(["python", "-m", "agy_multi.cli", "run", "3"], new_tab=True, title="agy: 3", cwd=fake_proj)
     assert ok is True
     call = orca_calls[0]
     assert "create" in call
     assert "--title" in call
     assert "agy: 3" in call
+    assert "--worktree" in call
+    assert f"path:{fake_proj}" in call
+
+    # 4. New tab fallback to active worktree if path selector fails
+    orca_calls.clear()
+    def mock_run_fail_then_succeed(cmd, *args, **kwargs):
+        orca_calls.append(cmd)
+        class Dummy:
+            returncode = 1 if f"path:{fake_proj}" in cmd else 0
+        return Dummy()
+
+    monkeypatch.setattr("subprocess.run", mock_run_fail_then_succeed)
+    ok = launch_orca_terminal(["python", "-m", "agy_multi.cli", "run", "3"], new_tab=True, title="agy: 3", cwd=fake_proj)
+    assert ok is True
+    assert len(orca_calls) == 2
+    assert "active" in orca_calls[1]
 
 
 def test_dispatch_relay_to_multiplexer_orca(tmp_path, monkeypatch):

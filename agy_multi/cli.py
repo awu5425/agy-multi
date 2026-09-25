@@ -1024,7 +1024,7 @@ exec "{main_bin}" run "{p['name']}" "$@"
 
 def cmd_wt(manager: ProfileManager, args: argparse.Namespace) -> int:
     """Launches or splits a session in Windows Terminal (wt.exe) or Orca client."""
-    profile_id = args.identifier
+    profile_id = getattr(args, "identifier", None)
     target_p = None
     if profile_id:
         target_p = manager.find_profile(profile_id)
@@ -1034,6 +1034,11 @@ def cmd_wt(manager: ProfileManager, args: argparse.Namespace) -> int:
     else:
         target_p = manager.get_active_or_recent_profile()
 
+    is_tab = getattr(args, "tab", False) or (getattr(args, "command", "") in ("tab", "new-tab"))
+    split_dir = getattr(args, "split", "v")
+    project_arg = getattr(args, "project", None)
+    target_cwd = Path(project_arg).resolve() if project_arg else Path.cwd()
+
     # Determine command to execute in new tab/pane
     cmd_args = ["python", "-m", "agy_multi.cli", "run"]
     if target_p:
@@ -1041,30 +1046,34 @@ def cmd_wt(manager: ProfileManager, args: argparse.Namespace) -> int:
 
     title = f"agy: {target_p['name']} [P{target_p['id']}]" if target_p else "agy-multi"
 
-    mode_str = "new tab" if args.tab else f"{'vertical' if args.split == 'v' else 'horizontal'} split pane"
+    mode_str = f"new tab [{target_cwd.name}]" if is_tab else f"{'vertical' if split_dir == 'v' else 'horizontal'} split pane"
 
     if is_orca_terminal():
         success = launch_orca_terminal(
             command_args=cmd_args,
-            split=args.split,
-            new_tab=args.tab,
+            split=split_dir,
+            new_tab=is_tab,
             title=title,
-            cwd=Path.cwd()
+            cwd=target_cwd
         )
         if success:
             print(f"{GREEN}✓ Successfully launched {title} in Orca ({mode_str}).{RESET}")
+            if project_arg:
+                print(f"  Project: {target_cwd}")
             return 0
 
     success = launch_windows_terminal(
         command_args=cmd_args,
-        split=args.split,
-        new_tab=args.tab,
+        split=split_dir,
+        new_tab=is_tab,
         title=title,
-        cwd=Path.cwd()
+        cwd=target_cwd
     )
 
     if success:
         print(f"{GREEN}✓ Successfully launched {title} in Windows Terminal ({mode_str}).{RESET}")
+        if project_arg:
+            print(f"  Project: {target_cwd}")
         return 0
     else:
         print(f"{RED}Failed to launch split pane or tab. Make sure Orca or 'wt.exe' is available.{RESET}")
@@ -1293,11 +1302,17 @@ def main():
     p_creds = subparsers.add_parser("creds", help="Inspect or auto-discover OAuth client credentials for 24/7 background token refresh")
     p_creds.add_argument("--save", action="store_true", help="Automatically discover credentials from local agy binary and append to ~/.bashrc")
 
-    # wt / split
-    p_wt = subparsers.add_parser("wt", aliases=["split"], help="Launch or split session inside Windows Terminal (wt.exe)")
+    # tab / new-tab
+    p_tab = subparsers.add_parser("tab", aliases=["new-tab"], help="Launch session in a new terminal tab in Orca or Windows Terminal")
+    p_tab.add_argument("identifier", nargs="?", default=None, help="Profile ID, name, or email (optional)")
+    p_tab.add_argument("--project", "-p", default=None, help="Target project / worktree directory (default: current directory)")
+
+    # split / wt
+    p_wt = subparsers.add_parser("split", aliases=["wt"], help="Launch session in a split pane (or new tab) inside Orca or Windows Terminal")
     p_wt.add_argument("identifier", nargs="?", default=None, help="Profile ID, name, or email (optional)")
     p_wt.add_argument("--split", choices=["v", "h"], default="v", help="Split orientation (v: vertical, h: horizontal, default: v)")
     p_wt.add_argument("--tab", action="store_true", help="Open as new tab instead of split pane")
+    p_wt.add_argument("--project", "-p", default=None, help="Target project / worktree directory (default: current directory)")
 
     # Parse known args so trailing args can be forwarded to agy in `run` and `relay`
     if len(sys.argv) > 1 and sys.argv[1] == "run":
@@ -1358,7 +1373,7 @@ def main():
         sys.exit(cmd_edit(manager, args))
     elif args.command == "creds":
         sys.exit(cmd_creds(manager, args))
-    elif args.command in ("wt", "split"):
+    elif args.command in ("wt", "split", "tab", "new-tab"):
         sys.exit(cmd_wt(manager, args))
     elif args.command == "install":
         sys.exit(cmd_install_helpers(manager, args))

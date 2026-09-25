@@ -153,7 +153,8 @@ agy-multi login 1                     # one-time Google OAuth flow (token stored
 agy-multi add coder coder@ex.com -d "Refactoring lead"
 agy-multi edit 2 --name coder-pro --email newcoder@ex.com
 agy-multi run [profile]               # same as agy-auto
-agy-multi split [profile] [--split v|h] # launch inside Orca or Windows Terminal pane or tab
+agy-multi tab [profile] [-p DIR]       # launch inside a new Orca or Windows Terminal tab (worktree-aware)
+agy-multi split [profile] [--split v|h] # launch inside Orca or Windows Terminal split pane
 agy-multi use [profile]               # rename current terminal pane & tab to profile (alias title/switch)
 agy-multi relay                       # smart auto-relay of the active session
 agy-multi relay --to 2                # targeted relay
