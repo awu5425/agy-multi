@@ -18,7 +18,7 @@ from .manager import ProfileManager
 from .utils import (
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET,
     load_env_config, detect_real_home, set_terminal_pane_title,
-    launch_windows_terminal
+    launch_windows_terminal, is_orca_terminal, launch_orca_terminal
 )
 
 
@@ -733,11 +733,19 @@ def cmd_creds(manager: ProfileManager, args: argparse.Namespace) -> int:
 
 def cmd_use(manager: ProfileManager, args: argparse.Namespace) -> int:
     """Explicitly sets the current terminal pane & tab title to represent a specific profile."""
-    profile = manager.find_profile(args.identifier)
-    if not profile:
-        print(f"{RED}Error: Profile '{args.identifier}' not found.{RESET}")
-        print("Run `agy-multi list` to see available profiles.")
-        return 1
+    identifier = getattr(args, "identifier", None)
+    if not identifier:
+        target = manager.get_active_or_recent_profile() or (manager.list_profiles()[0] if manager.list_profiles() else None)
+        if not target:
+            print(f"{RED}Error: No profiles configured.{RESET}")
+            return 1
+        profile = target
+    else:
+        profile = manager.find_profile(identifier)
+        if not profile:
+            print(f"{RED}Error: Profile '{identifier}' not found.{RESET}")
+            print("Run `agy-multi list` to see available profiles.")
+            return 1
 
     status_tag = ""
     auth_status = profile.get("auth", {})
@@ -747,7 +755,15 @@ def cmd_use(manager: ProfileManager, args: argparse.Namespace) -> int:
     new_title = f"agy: {profile['name']} [P{profile['id']}]{status_tag}"
     set_terminal_pane_title(new_title)
 
-    print(f"\n{GREEN}{BOLD}✓ Terminal Pane & Tab Title Updated:{RESET} {BOLD}{new_title}{RESET}")
+    env_label = ""
+    if is_orca_terminal():
+        env_label = " (Orca)"
+    elif os.environ.get("HERDR_PANE_ID"):
+        env_label = " (Herdr)"
+    elif os.environ.get("TMUX"):
+        env_label = " (Tmux)"
+
+    print(f"\n{GREEN}{BOLD}✓ Terminal Pane & Tab Title Updated{env_label}:{RESET} {BOLD}{new_title}{RESET}")
     print(f"  Account  : [{profile['id']}] {profile['name']} ({profile['email']})")
     if auth_status.get("is_valid"):
         print(f"  Auth     : {GREEN}● Logged In{RESET}")
@@ -1007,7 +1023,7 @@ exec "{main_bin}" run "{p['name']}" "$@"
 
 
 def cmd_wt(manager: ProfileManager, args: argparse.Namespace) -> int:
-    """Launches or splits a session in Windows Terminal (wt.exe)."""
+    """Launches or splits a session in Windows Terminal (wt.exe) or Orca client."""
     profile_id = args.identifier
     target_p = None
     if profile_id:
@@ -1025,6 +1041,20 @@ def cmd_wt(manager: ProfileManager, args: argparse.Namespace) -> int:
 
     title = f"agy: {target_p['name']} [P{target_p['id']}]" if target_p else "agy-multi"
 
+    mode_str = "new tab" if args.tab else f"{'vertical' if args.split == 'v' else 'horizontal'} split pane"
+
+    if is_orca_terminal():
+        success = launch_orca_terminal(
+            command_args=cmd_args,
+            split=args.split,
+            new_tab=args.tab,
+            title=title,
+            cwd=Path.cwd()
+        )
+        if success:
+            print(f"{GREEN}✓ Successfully launched {title} in Orca ({mode_str}).{RESET}")
+            return 0
+
     success = launch_windows_terminal(
         command_args=cmd_args,
         split=args.split,
@@ -1034,11 +1064,10 @@ def cmd_wt(manager: ProfileManager, args: argparse.Namespace) -> int:
     )
 
     if success:
-        mode_str = "new tab" if args.tab else f"{'vertical' if args.split == 'v' else 'horizontal'} split pane"
         print(f"{GREEN}✓ Successfully launched {title} in Windows Terminal ({mode_str}).{RESET}")
         return 0
     else:
-        print(f"{RED}Failed to launch Windows Terminal. Make sure 'wt.exe' is installed and in PATH.{RESET}")
+        print(f"{RED}Failed to launch split pane or tab. Make sure Orca or 'wt.exe' is available.{RESET}")
         return 1
 
 
@@ -1143,6 +1172,15 @@ def cmd_init(manager, args):
 
 
 def main():
+    if sys.platform == "win32":
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            if hasattr(sys.stderr, "reconfigure"):
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     load_env_config()
     parser = argparse.ArgumentParser(
         prog="agy-multi",
@@ -1169,9 +1207,9 @@ def main():
     p_login = subparsers.add_parser("login", aliases=["auth"], help="Trigger Google OAuth authentication for a profile")
     p_login.add_argument("identifier", help="Profile ID, name, or email")
 
-    # use / switch / pane-title
-    p_use = subparsers.add_parser("use", aliases=["switch", "pane-title"], help="Set the current terminal pane & tab title to represent a specific profile")
-    p_use.add_argument("identifier", help="Profile ID, name, or email")
+    # use / switch / pane-title / title
+    p_use = subparsers.add_parser("use", aliases=["switch", "pane-title", "title"], help="Set the current terminal pane & tab title to represent a specific profile")
+    p_use.add_argument("identifier", nargs="?", default=None, help="Profile ID, name, or email (optional: defaults to active profile)")
 
     # add
     p_add = subparsers.add_parser("add", help="Add a new profile")

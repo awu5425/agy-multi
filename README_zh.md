@@ -32,8 +32,8 @@
 - 🔄 **配额看门狗 + 自动接力** — 后台监控官方 5 小时滚动配额；配额耗尽瞬间安全中断，利用 SQLite 官方 Online Backup API 逐页备份，并在同一终端自动唤醒最空闲账号继续执行。
 - 📊 **实时用量监控看板** — 5 小时 / 周配额进度条与精确到秒的重置倒计时，包含 Read / Write / Cache / Thinking 多维视角的 Token 消耗趋势，GitHub 风格活跃度日历，中英文一键切换。
 - 🔒 **真正的单账号隔离沙箱** — 每个 Profile 拥有独立的 OAuth Token、会话日志与 SQLite 数据库（Windows 同步重定向 `USERPROFILE` 与 `HOME`）；多终端并发绝无锁冲突。默认严格排除敏感目录（`.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`）。
-- 🪟 **原生 Windows 与 Windows Terminal 支持** — 无需管理员权限的 NTFS 目录联接 Junction (`_winapi.CreateJunction`)、Win32 原生进程监控、跨平台 Sentinel 哨兵文件 IPC、一键分屏启动 (`agy-multi wt`) 与 `.cmd` 快捷脚本生成。
-- 🖥️ **兼容任意终端与分屏工具** — Windows Terminal、PowerShell、CMD、普通标签页、独立窗口、VS Code 内置终端、tmux、zellij 等无缝支持。
+- 🪟 **原生 Windows、Windows Terminal 与 Orca 客户端深度集成** — 无需管理员权限的 NTFS 目录联接 Junction (`_winapi.CreateJunction`)、Win32 原生进程监控、跨平台 Sentinel 哨兵文件 IPC、终端分屏/新建标签 (`agy-multi split` / `wt`)、分屏标题全自动打标 (`agy-multi use` / `title`) 与 `.cmd` 快捷脚本生成。
+- 🖥️ **兼容任意终端与多路复用器** — 原生适配 Orca 客户端、Windows Terminal、Herdr、Tmux、PowerShell、CMD、VS Code 内置终端等。
 
 *独立的社区开源项目 — 与 Google 无官方关联。详见 [免责与合规声明](#免责与合规声明)。*
 
@@ -50,7 +50,7 @@ cd agy-multi
 ./install.sh && agy-multi init
 ```
 
-**Windows (PowerShell / 命令提示符 CMD / Windows Terminal):**
+**Windows (PowerShell / 命令提示符 CMD / Windows Terminal / Orca):**
 ```powershell
 git clone https://github.com/awu5425/agy-multi.git
 cd agy-multi
@@ -68,11 +68,12 @@ agy-1                                               # 启动指定 profile
 agy-coder -p "审查本仓库中未解决的 TODO"              # 原生 agy 参数均可透传
 ```
 
-**Windows Terminal 快速分屏 / 标签页启动：**
+**Windows Terminal / Orca 客户端快速分屏与新建标签页：**
 ```powershell
-agy-multi wt coder --split v    # 在当前窗口垂直分屏打开 coder 账号
-agy-multi wt coder --split h    # 水平分屏打开 coder 账号
-agy-multi wt coder --tab        # 在新标签页打开 coder 账号
+agy-multi split coder --split v    # 垂直分屏打开 coder 账号（自适应 Orca 或 Windows Terminal）
+agy-multi split coder --split h    # 水平分屏打开 coder 账号
+agy-multi split coder --tab        # 在新标签页打开 coder 账号
+agy-multi use                      # 为当前终端分屏/标签页自动打上活跃账号名称（Orca/Herdr/Tmux/ANSI）
 ```
 
 ### 3. 查看配额与用量
@@ -153,7 +154,8 @@ agy-multi login 1                     # 针对指定账号执行 Google OAuth �
 agy-multi add coder coder@ex.com -d "重构负责人"
 agy-multi edit 2 --name coder-pro --email newcoder@ex.com
 agy-multi run [profile]               # 启动账号会话（等同于 agy-auto）
-agy-multi wt [profile] [--split v|h]  # 在 Windows Terminal 分屏或新标签页中启动
+agy-multi split [profile] [--split v|h] # 在 Orca 或 Windows Terminal 分屏/新标签页中启动
+agy-multi use [profile]               # 将当前终端分屏/标签页重命名为指定账号（别名 title/switch）
 agy-multi relay                       # 智能自动接力当前活跃会话
 agy-multi relay --to 2                # 定向接力至指定账号
 agy-multi relay <cid> --from 1 --to 2 # 显式跨账号迁移指定会话
@@ -176,11 +178,12 @@ agy-multi usage [--csv] [--html PATH] [--json]
 | Profile 与 Token 沙箱隔离 | ✅ 完全支持 | ✅ 完全支持 (`USERPROFILE` + NTFS 目录联接) | ⚠️ 基础支持 | ❌ 不支持 |
 | 进程状态与 PID 追踪 | ✅ 原生 (/proc) | ✅ 原生 (Win32 OpenProcess) | ⚠️ 基础 (ps/pgrep, 受 TCC 限制) | — |
 | 5H 配额看门狗与自动接力 | ✅ 完全支持 | ✅ 完全支持 (Sentinel 哨兵文件 IPC) | ⚠️ 基础支持 | ❌ 不支持 |
-| Windows Terminal 原生分屏 | — | ✅ 完全支持 (`agy-multi wt`) | — | — |
+| Orca 客户端分屏与自动改名 | ✅ 完全支持 | ✅ 完全支持 (`orca terminal rename / split`) | ✅ 完全支持 | — |
+| Windows Terminal 原生分屏 | — | ✅ 完全支持 (`agy-multi wt / split`) | — | — |
 | Web 实时用量看板 | ✅ 完全支持 | ✅ 完全支持 | ✅ 完全支持 | ⚠️ 仅 CLI 日志 |
 | 后台守护进程 | ✅ systemd | ⚠️ 任务计划程序 / NSSM | ⚠️ 手动 launchd | ❌ 不支持 |
 
-> Windows 原生环境已获得全面支持，零额外第三方依赖（通过无须提权的 NTFS 目录联接、Win32 API、Sentinel 哨兵文件以及 Windows Terminal 集成）。macOS CLI 支持为实验性。桌面 GUI 客户端（Antigravity 2.0 / IDE）不在支持范围内 — 其凭据保存在系统钥匙串中，无法通过终端 `$HOME` 沙箱隔离。
+> Windows 原生环境与 Orca 客户端已获得全面支持，零额外第三方依赖（通过无须提权的 NTFS 目录联接、Win32 API、Sentinel 哨兵文件以及 Orca / Windows Terminal 原生集成）。macOS CLI 支持为实验性。桌面 GUI 客户端（Antigravity 2.0 / IDE）不在支持范围内 — 其凭据保存在系统钥匙串中，无法通过终端 `$HOME` 沙箱隔离。
 
 </details>
 

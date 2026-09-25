@@ -32,8 +32,8 @@ You're 40 minutes into a deep refactor. Gemini slams into the 5-hour rolling quo
 - 🔄 **Quota watchdog + auto-relay** — monitors the official 5-hour rolling quota in the background; on exhaustion it SIGINT-saves, backs up SQLite via the Online Backup API, and relaunches on the idlest account in the exact same terminal.
 - 📊 **Real-time usage dashboard** — 5h/weekly quota bars with second-precision countdowns, token trends with Read / Write / Cache / Thinking breakdowns, GitHub-style activity calendar, one-click EN/中文.
 - 🔒 **True per-account sandboxing** — isolated OAuth tokens, conversation logs and SQLite DB per profile (`USERPROFILE` and `HOME` redirection); concurrent terminals never fight over locks. Sensitive dirs (`.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`) excluded by default.
-- 🪟 **Native Windows & Windows Terminal support** — unprivileged NTFS directory junctions (`_winapi.CreateJunction`), Win32 process tracking, cross-platform Sentinel file IPC, and one-command split-pane launching (`agy-multi wt`).
-- 🖥️ **Any terminal, any multiplexer** — Windows Terminal, PowerShell, CMD, tmux, zellij, VS Code integrated terminal…
+- 🪟 **Native Windows, Windows Terminal & Orca Client Deep Integration** — unprivileged NTFS directory junctions (`_winapi.CreateJunction`), Win32 process tracking, cross-platform Sentinel file IPC, split-pane & new-tab launcher (`agy-multi split` / `wt`), automatic pane & tab title naming (`agy-multi use` / `title`), and `.cmd` wrapper scripts.
+- 🖥️ **Any terminal, any multiplexer** — Orca Client, Windows Terminal, Herdr, Tmux, PowerShell, CMD, VS Code integrated terminal…
 
 *Independent community project — not affiliated with Google. See [Disclaimer](#disclaimer--terms-of-service).*
 
@@ -50,7 +50,7 @@ cd agy-multi
 ./install.sh && agy-multi init
 ```
 
-**Windows (PowerShell / Command Prompt / Windows Terminal):**
+**Windows (PowerShell / Command Prompt / Windows Terminal / Orca):**
 ```powershell
 git clone https://github.com/awu5425/agy-multi.git
 cd agy-multi
@@ -68,11 +68,12 @@ agy-1                                               # a specific profile
 agy-coder -p "Review unresolved TODOs in this repo"  # any native agy args pass through
 ```
 
-**Windows Terminal split-pane / tab launching:**
+**Windows Terminal / Orca Client split-pane / tab launching:**
 ```powershell
-agy-multi wt coder --split v    # launch in a vertical split pane
-agy-multi wt coder --split h    # launch in a horizontal split pane
-agy-multi wt coder --tab        # launch in a new tab
+agy-multi split coder --split v    # launch in a vertical split pane (auto-detects Orca or Windows Terminal)
+agy-multi split coder --split h    # launch in a horizontal split pane
+agy-multi split coder --tab        # launch in a new tab
+agy-multi use                      # rename current pane/tab to active profile (Orca/Herdr/Tmux/ANSI)
 ```
 
 ### 3. Watch your quotas
@@ -152,7 +153,8 @@ agy-multi login 1                     # one-time Google OAuth flow (token stored
 agy-multi add coder coder@ex.com -d "Refactoring lead"
 agy-multi edit 2 --name coder-pro --email newcoder@ex.com
 agy-multi run [profile]               # same as agy-auto
-agy-multi wt [profile] [--split v|h]  # launch inside Windows Terminal pane or tab
+agy-multi split [profile] [--split v|h] # launch inside Orca or Windows Terminal pane or tab
+agy-multi use [profile]               # rename current terminal pane & tab to profile (alias title/switch)
 agy-multi relay                       # smart auto-relay of the active session
 agy-multi relay --to 2                # targeted relay
 agy-multi relay <cid> --from 1 --to 2 # explicit conversation transfer
@@ -175,11 +177,12 @@ agy-multi usage [--csv] [--html PATH] [--json]
 | Profile & token sandboxing | ✅ Full | ✅ Full (USERPROFILE & NTFS Junctions) | ⚠️ Basic | ❌ |
 | Process & PID tracking | ✅ Native (/proc) | ✅ Native (Win32 OpenProcess) | ⚠️ Basic (ps/pgrep, TCC limits) | — |
 | 5H quota watchdog & relay | ✅ Full | ✅ Full (Sentinel file IPC) | ⚠️ Basic | ❌ |
-| Windows Terminal split-pane | — | ✅ Full (`agy-multi wt`) | — | — |
+| Orca Client pane split & auto-rename | ✅ Full | ✅ Full (`orca terminal rename / split`) | ✅ Full | — |
+| Windows Terminal split-pane | — | ✅ Full (`agy-multi wt / split`) | — | — |
 | Web dashboard | ✅ Full | ✅ Full | ✅ Full | ⚠️ CLI logs only |
 | Background daemon | ✅ systemd | ⚠️ Task Scheduler / NSSM | ⚠️ Manual launchd | ❌ |
 
-> Windows native is fully supported with zero external dependencies (utilizing unprivileged NTFS junctions, Win32 API, Sentinel IPC, and Windows Terminal integration). macOS CLI support is experimental. Desktop GUI apps (Antigravity 2.0 / IDE) are out of scope — they keep secrets in OS keychains and can't be sandboxed via `$HOME`.
+> Windows native and Orca client environments are fully supported with zero external dependencies (utilizing unprivileged NTFS junctions, Win32 API, Sentinel IPC, and Orca / Windows Terminal integration). macOS CLI support is experimental. Desktop GUI apps (Antigravity 2.0 / IDE) are out of scope — they keep secrets in OS keychains and can't be sandboxed via `$HOME`.
 
 </details>
 

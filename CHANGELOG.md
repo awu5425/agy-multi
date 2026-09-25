@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-25
+
+### Added
+- **Orca 终端客户端原生深度适配 (Orca Terminal Client Native Support)**：
+  - **自动打标分屏与标签标题 (Automatic Pane & Tab Title Renaming)**：
+    - 自动探测 Orca 客户端运行环境（`TERM_PROGRAM=Orca`、`ORCA_TERMINAL_HANDLE`、`ORCA_TAB_ID`、`ORCA_PANE_KEY`、`ORCA_WORKSPACE_ID` 等）；
+    - 优先联动调用 Orca 官方 CLI（`orca terminal rename [--terminal <handle>] --title <title>`），实现全生命周期自动同步（登录、会话启动、空闲打标、会话切片、手动 `agy-multi use`）；
+    - Windows 下使用 `CREATE_NO_WINDOW` 零闪烁静默调用。
+  - **Orca 原生分屏与标签页启动 (`agy-multi split` / `wt`)**：
+    - 在 Orca 终端下自动优先调用 `orca terminal split --direction vertical|horizontal --command ...` 原生切分窗格；
+    - 支持 `--tab` 参数通过 `orca terminal create --title ... --command ... --focus` 在新标签页秒级拉起账号会话。
+  - **Orca 客户端 Tier 2 多路复用器自动接力调度 (Multiplexer Injection Relay)**：
+    - 支持通过 `orca terminal list --json` 智能评分匹配目标窗格（精准权衡 `ORCA_TERMINAL_HANDLE`、会话前缀、账号标识、工作区工作路径）；
+    - 支持向目标窗格调度中断（`orca terminal send --terminal <handle> --interrupt`）与注入续跑指令（`orca terminal send --text ... --enter`）并自动改名。
+  - **Windows 中文代码页 (GBK / CP936) 编解码鲁棒性修复**：
+    - 入口处统一对 `sys.stdout` 与 `sys.stderr` 重置 UTF-8 编码与 `errors="replace"`，彻底根除打印 `✓`、`●` 等特殊 Unicode 字符时的 `UnicodeEncodeError`；
+    - 所有调用外部命令读取 JSON（`subprocess.run(..., text=True)`）严格指定 `encoding="utf-8", errors="replace"`，防止 Orca 输出 UTF-8 字符时在 Windows 默认 GBK 编码下触发 `UnicodeDecodeError`。
+
 ## [1.5.0] - 2026-09-25
 
 ### Added

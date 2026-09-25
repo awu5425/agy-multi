@@ -30,6 +30,9 @@ from agy_multi.utils import (
     file_lock,
     launch_windows_terminal,
     set_terminal_pane_title,
+    is_orca_terminal,
+    find_orca_binary,
+    launch_orca_terminal,
 )
 from agy_multi.manager import ProfileManager
 from agy_multi.runner import SessionRunner
@@ -307,3 +310,139 @@ def test_cmd_wt(tmp_path, monkeypatch):
 def test_set_terminal_pane_title():
     """Verifies set_terminal_pane_title executes safely on Windows."""
     set_terminal_pane_title("agy: test-title")
+
+
+def test_orca_terminal_detection(monkeypatch):
+    """Verifies Orca terminal environment detection."""
+    monkeypatch.delenv("TERM_PROGRAM", raising=False)
+    monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
+    monkeypatch.delenv("ORCA_TAB_ID", raising=False)
+    monkeypatch.delenv("ORCA_PANE_KEY", raising=False)
+    monkeypatch.delenv("ORCA_WORKSPACE_ID", raising=False)
+    assert is_orca_terminal() is False
+
+    monkeypatch.setenv("TERM_PROGRAM", "Orca")
+    assert is_orca_terminal() is True
+
+    monkeypatch.delenv("TERM_PROGRAM")
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "term_123")
+    assert is_orca_terminal() is True
+
+
+def test_set_terminal_pane_title_orca(monkeypatch):
+    """Verifies set_terminal_pane_title triggers orca terminal rename in Orca."""
+    orca_calls = []
+
+    def mock_run(cmd, *args, **kwargs):
+        orca_calls.append(cmd)
+        class Dummy:
+            returncode = 0
+            stdout = ""
+        return Dummy()
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+    monkeypatch.setattr("agy_multi.utils.find_orca_binary", lambda: "C:\\Fake\\orca.exe")
+    monkeypatch.setenv("TERM_PROGRAM", "Orca")
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "term_abc999")
+
+    set_terminal_pane_title("agy: work [P1] • 12345678")
+    assert len(orca_calls) >= 1
+    rename_call = next((c for c in orca_calls if "rename" in c), None)
+    assert rename_call is not None
+    assert "terminal" in rename_call
+    assert "--terminal" in rename_call
+    assert "term_abc999" in rename_call
+    assert "--title" in rename_call
+    assert "agy: work [P1] • 12345678" in rename_call
+
+
+def test_launch_orca_terminal(monkeypatch):
+    """Verifies launch_orca_terminal formats commands for split and new-tab."""
+    orca_calls = []
+
+    def mock_run(cmd, *args, **kwargs):
+        orca_calls.append(cmd)
+        class Dummy:
+            returncode = 0
+        return Dummy()
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+    monkeypatch.setattr("agy_multi.utils.find_orca_binary", lambda: "C:\\Fake\\orca.exe")
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "term_split_1")
+
+    # 1. Vertical split
+    ok = launch_orca_terminal(["python", "-m", "agy_multi.cli", "run", "1"], split="v", new_tab=False)
+    assert ok is True
+    call = orca_calls[0]
+    assert call[0] == "C:\\Fake\\orca.exe"
+    assert "terminal" in call
+    assert "split" in call
+    assert "--direction" in call
+    assert "vertical" in call
+
+    # 2. Horizontal split
+    orca_calls.clear()
+    ok = launch_orca_terminal(["python", "-m", "agy_multi.cli", "run", "2"], split="h", new_tab=False)
+    assert ok is True
+    call = orca_calls[0]
+    assert "horizontal" in call
+
+    # 3. New tab
+    orca_calls.clear()
+    ok = launch_orca_terminal(["python", "-m", "agy_multi.cli", "run", "3"], new_tab=True, title="agy: 3")
+    assert ok is True
+    call = orca_calls[0]
+    assert "create" in call
+    assert "--title" in call
+    assert "agy: 3" in call
+
+
+def test_dispatch_relay_to_multiplexer_orca(tmp_path, monkeypatch):
+    """Verifies dispatch_relay_to_multiplexer interacts with Orca terminal list and send."""
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    mgr.add_profile("src", "src@gmail.com", custom_id="1")
+    mgr.add_profile("tgt", "tgt@gmail.com", custom_id="2")
+
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    monkeypatch.setattr("agy_multi.manager.find_orca_binary", lambda: "C:\\Fake\\orca.exe")
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "term_active")
+
+    sent_commands = []
+
+    def mock_run(cmd, *args, **kwargs):
+        sent_commands.append(cmd)
+        class Dummy:
+            returncode = 0
+            stdout = json.dumps({
+                "ok": True,
+                "result": {
+                    "terminals": [
+                        {
+                            "handle": "term_active",
+                            "connected": True,
+                            "title": "agy: src [P1] • 11223344",
+                            "worktreePath": str(tmp_path)
+                        }
+                    ]
+                }
+            })
+        return Dummy()
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    res = mgr.dispatch_relay_to_multiplexer(
+        from_identifier="1",
+        target_profile="2",
+        conversation_id="11223344-5566-7788-9900-aabbccddeeff"
+    )
+
+    assert res is not None
+    assert res["multiplexer"] == "orca"
+    assert res["pane_id"] == "term_active"
+

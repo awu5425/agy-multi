@@ -881,18 +881,72 @@ def find_process_running_conversation(
     return None
 
 
+def is_orca_terminal() -> bool:
+    """Detects whether running inside Orca terminal client."""
+    return (
+        os.environ.get("TERM_PROGRAM") == "Orca"
+        or bool(os.environ.get("ORCA_TERMINAL_HANDLE"))
+        or bool(os.environ.get("ORCA_TAB_ID"))
+        or bool(os.environ.get("ORCA_PANE_KEY"))
+        or bool(os.environ.get("ORCA_WORKSPACE_ID"))
+    )
+
+
+def find_orca_binary() -> Optional[str]:
+    """Finds the Orca CLI binary executable path."""
+    cand = shutil.which("orca") or shutil.which("orca.exe")
+    if cand:
+        return cand
+    preflight = os.environ.get("ORCA_CODEX_LAUNCH_PREFLIGHT")
+    if preflight and os.path.isfile(preflight):
+        return preflight
+    if sys.platform == "win32":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            p = Path(local_app) / "Programs" / "orca" / "resources" / "bin" / "orca.exe"
+            if p.is_file():
+                return str(p)
+    return None
+
+
 def set_terminal_pane_title(title: str) -> None:
     """Sets terminal pane / window title across multiple multiplexers and standard terminals.
 
     Supports:
-    1. Herdr: `herdr pane rename <HERDR_PANE_ID> <title>` if HERDR_PANE_ID is set.
-    2. Tmux / Rmux: `tmux select-pane -t <TMUX_PANE> -T <title>` if TMUX / TMUX_PANE is set.
-    3. Universal ANSI / OSC 2: `\033]2;<title>\007` to stdout (supports Orca, Xterm, iTerm, WezTerm, etc.).
+    1. Orca: `orca terminal rename [--terminal <handle>] --title <title>` if running in Orca client.
+    2. Herdr: `herdr pane rename <HERDR_PANE_ID> <title>` if HERDR_PANE_ID is set.
+    3. Tmux / Rmux: `tmux select-pane -t <TMUX_PANE> -T <title>` if TMUX / TMUX_PANE is set.
+    4. Windows Win32 API: `SetConsoleTitleW(title)`
+    5. Universal ANSI / OSC 0 and OSC 2 sequence: `\033]0;...\007\033]2;...\007` to stdout.
     """
     if not title:
         return
 
-    # 1. Herdr pane & tab rename
+    # 1. Orca client pane & tab rename
+    if is_orca_terminal():
+        orca_bin = find_orca_binary()
+        if orca_bin:
+            cmd = [orca_bin, "terminal", "rename"]
+            term_handle = os.environ.get("ORCA_TERMINAL_HANDLE")
+            if term_handle:
+                cmd.extend(["--terminal", term_handle])
+            cmd.extend(["--title", title])
+            try:
+                extra_kwargs = {}
+                if sys.platform == "win32":
+                    extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1.5,
+                    check=False,
+                    **extra_kwargs
+                )
+            except Exception:
+                pass
+
+    # 2. Herdr pane & tab rename
     herdr_pane_id = os.environ.get("HERDR_PANE_ID")
     herdr_tab_id = os.environ.get("HERDR_TAB_ID")
     if herdr_pane_id or herdr_tab_id:
@@ -904,6 +958,8 @@ def set_terminal_pane_title(title: str) -> None:
                         [herdr_bin, "pane", "get", herdr_pane_id],
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=1.0,
                         check=False
                     )
@@ -936,7 +992,7 @@ def set_terminal_pane_title(title: str) -> None:
                 except Exception:
                     pass
 
-    # 2. Tmux / Rmux pane title
+    # 3. Tmux / Rmux pane title
     if os.environ.get("TMUX") or os.environ.get("RMUX"):
         tmux_bin = shutil.which("tmux") or shutil.which("rmux")
         if tmux_bin:
@@ -956,7 +1012,7 @@ def set_terminal_pane_title(title: str) -> None:
             except Exception:
                 pass
 
-    # 3. Windows Win32 API fallback for classic conhost / PowerShell
+    # 4. Windows Win32 API fallback for classic conhost / PowerShell
     if sys.platform == "win32":
         try:
             import ctypes
@@ -964,7 +1020,7 @@ def set_terminal_pane_title(title: str) -> None:
         except Exception:
             pass
 
-    # 4. Universal ANSI / OSC 0 and OSC 2 sequence (Windows Terminal, Orca, WezTerm, Alacritty, GNOME Terminal, etc.)
+    # 5. Universal ANSI / OSC 0 and OSC 2 sequence (Windows Terminal, WezTerm, Alacritty, GNOME Terminal, etc.)
     try:
         seq = f"\033]0;{title}\007\033]2;{title}\007"
         if sys.stdout:
@@ -972,6 +1028,54 @@ def set_terminal_pane_title(title: str) -> None:
             sys.stdout.flush()
     except Exception:
         pass
+
+
+def launch_orca_terminal(
+    command_args: List[str],
+    split: Optional[str] = "v",
+    new_tab: bool = False,
+    title: Optional[str] = None,
+    cwd: Optional[Path] = None
+) -> bool:
+    """Launches or splits a pane in Orca client (orca.exe terminal split / create)."""
+    orca_bin = find_orca_binary()
+    if not orca_bin:
+        return False
+
+    extra_kwargs = {}
+    if sys.platform == "win32":
+        extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    cmd_str = " ".join(f'"{a}"' if " " in a else a for a in command_args)
+
+    if new_tab:
+        cmd = [orca_bin, "terminal", "create"]
+        if title:
+            cmd.extend(["--title", title])
+        if cwd:
+            cmd.extend(["--worktree", f"path:{cwd}"])
+        cmd.extend(["--command", cmd_str, "--focus"])
+    else:
+        cmd = [orca_bin, "terminal", "split"]
+        term_handle = os.environ.get("ORCA_TERMINAL_HANDLE")
+        if term_handle:
+            cmd.extend(["--terminal", term_handle])
+        direction = "horizontal" if split == "h" else "vertical"
+        cmd.extend(["--direction", direction])
+        cmd.extend(["--command", cmd_str])
+
+    try:
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3.0,
+            check=False,
+            **extra_kwargs
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
 
 
 def launch_windows_terminal(

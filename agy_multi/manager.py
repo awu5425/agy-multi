@@ -27,6 +27,7 @@ from .utils import (
     is_process_alive,
     interrupt_process,
     build_profile_env,
+    find_orca_binary,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -1153,6 +1154,8 @@ class ProfileManager:
                     ["herdr", "pane", "list"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=3
                 )
                 if res.returncode == 0 and res.stdout.strip():
@@ -1228,6 +1231,8 @@ class ProfileManager:
                     ["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_current_path}\t#{pane_title}\t#{pane_active}"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=3
                 )
                 if res.returncode == 0 and res.stdout.strip():
@@ -1269,6 +1274,69 @@ class ProfileManager:
                         return {
                             "multiplexer": "tmux",
                             "pane_id": target_pane_id,
+                            "command": cmd_str,
+                            "title": pane_title
+                        }
+            except Exception:
+                pass
+
+        # 4. Check Orca client
+        orca_bin = find_orca_binary()
+        if orca_bin:
+            try:
+                extra_kwargs = {}
+                if sys.platform == "win32":
+                    extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                res = subprocess.run(
+                    [orca_bin, "terminal", "list", "--json"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=3,
+                    **extra_kwargs
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout)
+                    terminals = data.get("result", {}).get("terminals", [])
+                    scored_terms = []
+                    curr_handle = os.environ.get("ORCA_TERMINAL_HANDLE")
+                    for t in terminals:
+                        thandle = t.get("handle")
+                        if not thandle or not t.get("connected"):
+                            continue
+                        score = 0
+                        if curr_handle and thandle == curr_handle:
+                            score += 1000
+                        ttitle = str(t.get("title") or "")
+                        if conversation_id[:8] in ttitle:
+                            score += 200
+                        if from_name and from_name in ttitle:
+                            score += 100
+                        if from_id and f"[P{from_id}]" in ttitle:
+                            score += 100
+                        tpath = t.get("worktreePath")
+                        if tpath and any(str(tpath).lower() == str(cp).lower() for cp in candidate_paths):
+                            score += 50
+                        
+                        if score >= 50:
+                            scored_terms.append((score, thandle))
+
+                    if scored_terms:
+                        scored_terms.sort(key=lambda x: x[0], reverse=True)
+                        target_handle = scored_terms[0][1]
+
+                        if running_proc and running_proc.get("pid"):
+                            interrupt_process(running_proc["pid"])
+
+                        subprocess.run([orca_bin, "terminal", "send", "--terminal", target_handle, "--interrupt"], capture_output=True, timeout=3, **extra_kwargs)
+                        time.sleep(0.3)
+                        subprocess.run([orca_bin, "terminal", "send", "--terminal", target_handle, "--text", cmd_str, "--enter"], capture_output=True, timeout=3, **extra_kwargs)
+                        subprocess.run([orca_bin, "terminal", "rename", "--terminal", target_handle, "--title", pane_title], capture_output=True, timeout=3, **extra_kwargs)
+
+                        return {
+                            "multiplexer": "orca",
+                            "pane_id": target_handle,
                             "command": cmd_str,
                             "title": pane_title
                         }

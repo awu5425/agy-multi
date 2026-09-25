@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agy-multi"
-version = "1.5.0"
+version = "1.5.1"
 description = "Google Antigravity (agy) multi-account manager, concurrent isolation runner, and usage dashboard across Linux and Windows"
 readme = "README.md"
 authors = [{ name = "agy-multi contributors" }]
