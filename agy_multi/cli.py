@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .manager import ProfileManager
-from .utils import BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET, load_env_config, detect_real_home, set_terminal_pane_title
+from .utils import (
+    BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET,
+    load_env_config, detect_real_home, set_terminal_pane_title,
+    launch_windows_terminal
+)
 
 
 
@@ -595,7 +599,20 @@ def cmd_run(manager: ProfileManager, args: argparse.Namespace, remaining_args: L
 
 def extract_credentials_from_binary() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Inspects installed Antigravity CLI binary to extract built-in Google OAuth credentials."""
-    bin_path = shutil.which("agy") or shutil.which("antigravity")
+    bin_path = shutil.which("agy") or shutil.which("agy.exe") or shutil.which("antigravity") or shutil.which("antigravity.exe")
+    if not bin_path:
+        # Fallback for extensionless binaries in PATH (e.g. cross-platform mock tests)
+        for p in os.environ.get("PATH", "").split(os.pathsep):
+            if not p:
+                continue
+            for name in ("agy", "agy.exe", "antigravity", "antigravity.exe"):
+                cand = Path(p) / name
+                if cand.is_file():
+                    bin_path = str(cand)
+                    break
+            if bin_path:
+                break
+
     if not bin_path or not os.path.isfile(bin_path):
         return None, None, None
     try:
@@ -963,9 +980,66 @@ exec "{main_bin}" run "{p['name']}" "$@"
         shortcut_name.chmod(0o755)
         print(f"{GREEN}✓ Installed shortcut: {shortcut_name} -> {p['email']}{RESET}")
 
+    # 4. On Windows, also generate native .cmd wrappers
+    if sys.platform == "win32":
+        main_cmd = local_bin / "agy-multi.cmd"
+        with open(main_cmd, "w", encoding="utf-8") as f:
+            f.write("@echo off\r\npython -m agy_multi.cli %*\r\n")
+        print(f"{GREEN}✓ Installed Windows script: {main_cmd}{RESET}")
+
+        auto_cmd = local_bin / "agy-auto.cmd"
+        with open(auto_cmd, "w", encoding="utf-8") as f:
+            f.write("@echo off\r\npython -m agy_multi.cli run %*\r\n")
+        print(f"{GREEN}✓ Installed Windows script: {auto_cmd}{RESET}")
+
+        for p in profiles:
+            p_id_cmd = local_bin / f"agy-{p['id']}.cmd"
+            with open(p_id_cmd, "w", encoding="utf-8") as f:
+                f.write(f"@echo off\r\npython -m agy_multi.cli run {p['id']} %*\r\n")
+
+            p_name_cmd = local_bin / f"agy-{p['name']}.cmd"
+            with open(p_name_cmd, "w", encoding="utf-8") as f:
+                f.write(f"@echo off\r\npython -m agy_multi.cli run {p['name']} %*\r\n")
+
     print(f"\n{BOLD}{CYAN}All shortcuts are available in your PATH!{RESET}")
-    print("You can run them in any terminal or herdr pane directly.")
+    print("You can run them in any terminal, Windows Terminal, or multiplexer pane directly.")
     return 0
+
+
+def cmd_wt(manager: ProfileManager, args: argparse.Namespace) -> int:
+    """Launches or splits a session in Windows Terminal (wt.exe)."""
+    profile_id = args.identifier
+    target_p = None
+    if profile_id:
+        target_p = manager.find_profile(profile_id)
+        if not target_p:
+            print(f"{RED}Error: Profile '{profile_id}' not found.{RESET}")
+            return 1
+    else:
+        target_p = manager.get_active_or_recent_profile()
+
+    # Determine command to execute in new tab/pane
+    cmd_args = ["python", "-m", "agy_multi.cli", "run"]
+    if target_p:
+        cmd_args.append(target_p["name"])
+
+    title = f"agy: {target_p['name']} [P{target_p['id']}]" if target_p else "agy-multi"
+
+    success = launch_windows_terminal(
+        command_args=cmd_args,
+        split=args.split,
+        new_tab=args.tab,
+        title=title,
+        cwd=Path.cwd()
+    )
+
+    if success:
+        mode_str = "new tab" if args.tab else f"{'vertical' if args.split == 'v' else 'horizontal'} split pane"
+        print(f"{GREEN}✓ Successfully launched {title} in Windows Terminal ({mode_str}).{RESET}")
+        return 0
+    else:
+        print(f"{RED}Failed to launch Windows Terminal. Make sure 'wt.exe' is installed and in PATH.{RESET}")
+        return 1
 
 
 def cmd_serve(manager, args):
@@ -1181,6 +1255,12 @@ def main():
     p_creds = subparsers.add_parser("creds", help="Inspect or auto-discover OAuth client credentials for 24/7 background token refresh")
     p_creds.add_argument("--save", action="store_true", help="Automatically discover credentials from local agy binary and append to ~/.bashrc")
 
+    # wt / split
+    p_wt = subparsers.add_parser("wt", aliases=["split"], help="Launch or split session inside Windows Terminal (wt.exe)")
+    p_wt.add_argument("identifier", nargs="?", default=None, help="Profile ID, name, or email (optional)")
+    p_wt.add_argument("--split", choices=["v", "h"], default="v", help="Split orientation (v: vertical, h: horizontal, default: v)")
+    p_wt.add_argument("--tab", action="store_true", help="Open as new tab instead of split pane")
+
     # Parse known args so trailing args can be forwarded to agy in `run` and `relay`
     if len(sys.argv) > 1 and sys.argv[1] == "run":
         if "-h" in sys.argv or "--help" in sys.argv:
@@ -1240,6 +1320,8 @@ def main():
         sys.exit(cmd_edit(manager, args))
     elif args.command == "creds":
         sys.exit(cmd_creds(manager, args))
+    elif args.command in ("wt", "split"):
+        sys.exit(cmd_wt(manager, args))
     elif args.command == "install":
         sys.exit(cmd_install_helpers(manager, args))
     else:

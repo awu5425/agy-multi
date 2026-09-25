@@ -3,6 +3,7 @@ Unit tests for agy_multi manager and utils.
 """
 
 import os
+import sys
 import json
 import tempfile
 import pytest
@@ -196,9 +197,10 @@ def test_sensitive_directories_excluded_from_symlink(tmp_path):
     from agy_multi.utils import sync_profile_environment
     sync_profile_environment(pdir, mock_home)
 
-    # .gitconfig should be symlinked
+    # .gitconfig should be symlinked or linked
     assert (pdir / ".gitconfig").exists()
-    assert (pdir / ".gitconfig").is_symlink()
+    if sys.platform != "win32":
+        assert (pdir / ".gitconfig").is_symlink()
 
     # Sensitive credential dirs must NOT be symlinked
     assert not (pdir / ".ssh").exists()
@@ -213,20 +215,17 @@ def test_registry_and_profile_permissions(tmp_path):
     base_dir = tmp_path / "profiles"
 
     mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
-    # Check directory permissions (0700)
-    base_mode = stat.S_IMODE(base_dir.stat().st_mode)
-    assert base_mode == 0o700
+    # Check directory permissions (0700 on Unix)
+    if sys.platform != "win32":
+        base_mode = stat.S_IMODE(base_dir.stat().st_mode)
+        assert base_mode == 0o700
 
-    # Check accounts.json permissions (0600)
+    # Check accounts.json permissions (0600 on Unix)
     reg_file = base_dir / "accounts.json"
     assert reg_file.is_file()
-    reg_mode = stat.S_IMODE(reg_file.stat().st_mode)
-    assert reg_mode == 0o600
-
-
-
-
-
+    if sys.platform != "win32":
+        reg_mode = stat.S_IMODE(reg_file.stat().st_mode)
+        assert reg_mode == 0o600
 
 
 def test_import_existing_token_permissions(tmp_path):
@@ -253,8 +252,9 @@ def test_import_existing_token_permissions(tmp_path):
 
     target = mgr.get_token_path("coder")
     assert target.is_file()
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
-    assert stat.S_IMODE(mgr.get_profile_dir("coder").stat().st_mode) == 0o700
+    if sys.platform != "win32":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert stat.S_IMODE(mgr.get_profile_dir("coder").stat().st_mode) == 0o700
 
 
 def test_evaluate_token_expiry_states():
@@ -411,10 +411,11 @@ def test_inherit_profile_config_and_security_boundary(tmp_path):
     assert (tgt_cfg / "skills" / "demo_skill" / "SKILL.md").is_file()
     # Verify plugin copied
     assert (tgt_cfg / "plugins" / "demo_plugin" / "plugin.json").is_file()
-    # Verify MCP config copied with 0o600
+    # Verify MCP config copied with 0o600 on Unix
     tgt_mcp = tgt_cfg / "mcp_config.json"
     assert tgt_mcp.is_file()
-    assert stat.S_IMODE(tgt_mcp.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(tgt_mcp.stat().st_mode) == 0o600
 
     # Verify settings sanitized (sensitive token stripped)
     tgt_settings = tgt_cli / "settings.json"

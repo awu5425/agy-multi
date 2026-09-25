@@ -7,7 +7,6 @@ import os
 import sys
 import json
 import time
-import fcntl
 import signal
 import shutil
 import sqlite3
@@ -24,6 +23,10 @@ from .utils import (
     detect_real_home,
     find_process_running_conversation,
     set_terminal_pane_title,
+    file_lock,
+    is_process_alive,
+    interrupt_process,
+    build_profile_env,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -45,6 +48,10 @@ class ProfileManager:
     @staticmethod
     def _detect_real_home() -> Path:
         return detect_real_home()
+
+    def _ensure_profile_links(self, profile_dir: Path) -> None:
+        """Ensures profile environment links and configs are synchronized (NTFS junction & symlink safe)."""
+        sync_profile_environment(profile_dir, self.real_home)
 
 
     def _ensure_initialized(self) -> None:
@@ -185,7 +192,7 @@ class ProfileManager:
 
         # Initialize profile directory & symlinks
         pdir = self.get_profile_dir(name)
-        sync_profile_environment(pdir, self.real_home)
+        self._ensure_profile_links(pdir)
 
         # Handle configuration inheritance if requested
         if inherit_from:
@@ -434,20 +441,15 @@ class ProfileManager:
 
         pdir = self.get_profile_dir(p["name"])
         # Fast sync symlinks in case new tools/configs were added to real_home
-        sync_profile_environment(pdir, self.real_home)
+        self._ensure_profile_links(pdir)
 
-        env = os.environ.copy()
-        env["HOME"] = str(pdir)
-        env["AGY_REAL_HOME"] = str(self.real_home)
-        env["AGY_PROFILE_NAME"] = p["name"]
-        env["AGY_PROFILE_ID"] = p["id"]
-        env["AGY_PROFILE_EMAIL"] = p["email"]
+        env = build_profile_env(p, pdir, self.real_home)
 
-        agy_binary = shutil.which("agy") or str(self.real_home / ".local" / "bin" / "agy")
+        agy_binary = shutil.which("agy") or shutil.which("agy.exe") or str(self.real_home / ".local" / "bin" / "agy")
         cmd = [agy_binary] + agy_args
 
-        if exec_replace:
-            # Replaces the current process (standard for interactive TUI)
+        if exec_replace and hasattr(os, "execvpe"):
+            # Replaces the current process (standard for interactive TUI on Unix)
             sys.stdout.flush()
             sys.stderr.flush()
             os.execvpe(agy_binary, cmd, env)
@@ -463,7 +465,7 @@ class ProfileManager:
             raise ValueError(f"Profile '{identifier}' not found.")
 
         pdir = self.get_profile_dir(p["name"])
-        sync_profile_environment(pdir, self.real_home)
+        self._ensure_profile_links(pdir)
 
         set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}] (authenticating)")
 
@@ -484,9 +486,8 @@ class ProfileManager:
         print("A Google authorization link will be displayed below.")
         print("Please log in with the corresponding Google AI Pro account in your browser.\n")
 
-        env = os.environ.copy()
-        env["HOME"] = str(pdir)
-        agy_binary = shutil.which("agy") or str(self.real_home / ".local" / "bin" / "agy")
+        env = build_profile_env(p, pdir, self.real_home)
+        agy_binary = shutil.which("agy") or shutil.which("agy.exe") or str(self.real_home / ".local" / "bin" / "agy")
 
         # Launch agy in interactive turn to trigger authentication
         cmd = [agy_binary, "-p", "ping"]
@@ -751,67 +752,63 @@ class ProfileManager:
 
         # Acquire lock to prevent parallel relays from racing
         lock_file = self.base_dir / "relay.lock"
-        with open(lock_file, "w") as lock_f:
-            fcntl.flock(lock_f, fcntl.LOCK_EX)
+        with file_lock(lock_file):
+            # 3. Copy conversation database safely using SQLite Backup API with fallback
             try:
-                # 3. Copy conversation database safely using SQLite Backup API with fallback
+                src_conn = sqlite3.connect(f"file:{src_convo_db.resolve()}?mode=ro", uri=True, timeout=10.0)
+                dst_conn = sqlite3.connect(dst_convo_db, timeout=10.0)
+                src_conn.backup(dst_conn)
+                src_conn.close()
+                dst_conn.close()
+            except Exception:
+                shutil.copy2(src_convo_db, dst_convo_db)
+
+            # 4. Sync conversation_summaries.db metadata
+            src_summaries_db = src_cli / "conversation_summaries.db"
+            dst_summaries_db = dst_cli / "conversation_summaries.db"
+            if src_summaries_db.is_file():
                 try:
-                    src_conn = sqlite3.connect(f"file:{src_convo_db.resolve()}?mode=ro", uri=True, timeout=10.0)
-                    dst_conn = sqlite3.connect(dst_convo_db, timeout=10.0)
-                    src_conn.backup(dst_conn)
+                    src_conn = sqlite3.connect(f"file:{src_summaries_db.resolve()}?mode=ro", uri=True, timeout=5.0)
+                    src_conn.row_factory = sqlite3.Row
+                    src_cur = src_conn.cursor()
+                    src_cur.execute("SELECT * FROM conversation_summaries WHERE conversation_id = ?;", (conversation_id,))
+                    row = src_cur.fetchone()
                     src_conn.close()
-                    dst_conn.close()
+
+                    if row:
+                        row_dict = dict(row)
+                        if row_dict.get("title"):
+                            convo_title = row_dict["title"]
+
+                        dst_conn = sqlite3.connect(dst_summaries_db, timeout=10.0)
+                        dst_cur = dst_conn.cursor()
+                        dst_cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_summaries';")
+                        if not dst_cur.fetchone():
+                            # Create schema from source
+                            src_conn2 = sqlite3.connect(f"file:{src_summaries_db.resolve()}?mode=ro", uri=True, timeout=5.0)
+                            cur2 = src_conn2.cursor()
+                            cur2.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='conversation_summaries';")
+                            create_sql = cur2.fetchone()[0]
+                            src_conn2.close()
+                            dst_cur.execute(create_sql)
+
+                        cols = list(row_dict.keys())
+                        placeholders = ", ".join(["?"] * len(cols))
+                        col_names = ", ".join([f"`{c}`" for c in cols])
+                        values = [row_dict[c] for c in cols]
+                        dst_cur.execute(f"INSERT OR REPLACE INTO conversation_summaries ({col_names}) VALUES ({placeholders});", values)
+                        dst_conn.commit()
+                        dst_conn.close()
                 except Exception:
-                    shutil.copy2(src_convo_db, dst_convo_db)
+                    pass
 
-                # 4. Sync conversation_summaries.db metadata
-                src_summaries_db = src_cli / "conversation_summaries.db"
-                dst_summaries_db = dst_cli / "conversation_summaries.db"
-                if src_summaries_db.is_file():
-                    try:
-                        src_conn = sqlite3.connect(f"file:{src_summaries_db.resolve()}?mode=ro", uri=True, timeout=5.0)
-                        src_conn.row_factory = sqlite3.Row
-                        src_cur = src_conn.cursor()
-                        src_cur.execute("SELECT * FROM conversation_summaries WHERE conversation_id = ?;", (conversation_id,))
-                        row = src_cur.fetchone()
-                        src_conn.close()
-
-                        if row:
-                            row_dict = dict(row)
-                            if row_dict.get("title"):
-                                convo_title = row_dict["title"]
-
-                            dst_conn = sqlite3.connect(dst_summaries_db, timeout=10.0)
-                            dst_cur = dst_conn.cursor()
-                            dst_cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_summaries';")
-                            if not dst_cur.fetchone():
-                                # Create schema from source
-                                src_conn2 = sqlite3.connect(f"file:{src_summaries_db.resolve()}?mode=ro", uri=True, timeout=5.0)
-                                cur2 = src_conn2.cursor()
-                                cur2.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='conversation_summaries';")
-                                create_sql = cur2.fetchone()[0]
-                                src_conn2.close()
-                                dst_cur.execute(create_sql)
-
-                            cols = list(row_dict.keys())
-                            placeholders = ", ".join(["?"] * len(cols))
-                            col_names = ", ".join([f"`{c}`" for c in cols])
-                            values = [row_dict[c] for c in cols]
-                            dst_cur.execute(f"INSERT OR REPLACE INTO conversation_summaries ({col_names}) VALUES ({placeholders});", values)
-                            dst_conn.commit()
-                            dst_conn.close()
-                    except Exception:
-                        pass
-
-                # 5. Sync brain/<cid> artifacts and scratch files
-                if sync_brain:
-                    src_brain = src_cli / "brain" / conversation_id
-                    dst_brain = dst_cli / "brain" / conversation_id
-                    if src_brain.is_dir():
-                        dst_brain.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copytree(src_brain, dst_brain, dirs_exist_ok=True)
-            finally:
-                fcntl.flock(lock_f, fcntl.LOCK_UN)
+            # 5. Sync brain/<cid> artifacts and scratch files
+            if sync_brain:
+                src_brain = src_cli / "brain" / conversation_id
+                dst_brain = dst_cli / "brain" / conversation_id
+                if src_brain.is_dir():
+                    dst_brain.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(src_brain, dst_brain, dirs_exist_ok=True)
 
         # Record relay event in registry directory for supervisor coordination
         try:
@@ -909,67 +906,59 @@ class ProfileManager:
         """Registers a running SessionRunner supervisor session."""
         sup_file = self._get_supervisors_file()
         lock_file = self.base_dir / "supervisors.lock"
-        with open(lock_file, "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
-            try:
-                data = {}
-                if sup_file.is_file():
-                    try:
-                        data = json.loads(sup_file.read_text(encoding="utf-8"))
-                    except Exception:
-                        data = {}
+        with file_lock(lock_file):
+            data = {}
+            if sup_file.is_file():
+                try:
+                    data = json.loads(sup_file.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
 
-                # Prune stale PIDs
-                active_data = {}
-                for spid_str, info in data.items():
-                    try:
-                        spid = int(spid_str)
-                        os.kill(spid, 0)
+            # Prune stale PIDs safely without killing on Windows
+            active_data = {}
+            for spid_str, info in data.items():
+                try:
+                    spid = int(spid_str)
+                    if is_process_alive(spid):
                         active_data[spid_str] = info
-                    except (OSError, ValueError):
-                        pass
+                except (OSError, ValueError):
+                    pass
 
-                active_data[str(pid)] = {
-                    "pid": pid,
-                    "profile_name": profile_name,
-                    "profile_id": profile_id,
-                    "conversation_id": conversation_id or "",
-                    "started_at": time.time(),
-                    "pane_info": pane_info or {}
-                }
+            active_data[str(pid)] = {
+                "pid": pid,
+                "profile_name": profile_name,
+                "profile_id": profile_id,
+                "conversation_id": conversation_id or "",
+                "started_at": time.time(),
+                "pane_info": pane_info or {}
+            }
 
-                tmp_file = sup_file.with_suffix(".tmp")
-                tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
-                tmp_file.replace(sup_file)
-            finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+            tmp_file = sup_file.with_suffix(".tmp")
+            tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp_file.replace(sup_file)
 
     def unregister_active_supervisor(self, pid: int) -> None:
         """Removes a SessionRunner supervisor session upon termination."""
         sup_file = self._get_supervisors_file()
         lock_file = self.base_dir / "supervisors.lock"
-        with open(lock_file, "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
-            try:
-                if sup_file.is_file():
-                    try:
-                        data = json.loads(sup_file.read_text(encoding="utf-8"))
-                        if str(pid) in data:
-                            del data[str(pid)]
-                            tmp_file = sup_file.with_suffix(".tmp")
-                            tmp_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-                            tmp_file.replace(sup_file)
-                    except Exception:
-                        pass
-                # Also clean any leftover relay command file for this pid
-                cmd_file = self.base_dir / f"relay_cmd_{pid}.json"
-                if cmd_file.is_file():
-                    try:
-                        cmd_file.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-            finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+        with file_lock(lock_file):
+            if sup_file.is_file():
+                try:
+                    data = json.loads(sup_file.read_text(encoding="utf-8"))
+                    if str(pid) in data:
+                        del data[str(pid)]
+                        tmp_file = sup_file.with_suffix(".tmp")
+                        tmp_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                        tmp_file.replace(sup_file)
+                except Exception:
+                    pass
+            # Also clean any leftover relay command file for this pid
+            cmd_file = self.base_dir / f"relay_cmd_{pid}.json"
+            if cmd_file.is_file():
+                try:
+                    cmd_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def find_active_supervisor(
         self,
@@ -982,24 +971,22 @@ class ProfileManager:
             return None
 
         lock_file = self.base_dir / "supervisors.lock"
-        with open(lock_file, "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
+        with file_lock(lock_file):
             try:
+                data = json.loads(sup_file.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+
+            target_p = self.find_profile(profile_identifier) if profile_identifier else None
+            target_p_name = target_p["name"] if target_p else (str(profile_identifier) if profile_identifier else None)
+
+            active_data = {}
+            matched_supervisor = None
+
+            for spid_str, info in data.items():
                 try:
-                    data = json.loads(sup_file.read_text(encoding="utf-8"))
-                except Exception:
-                    return None
-
-                target_p = self.find_profile(profile_identifier) if profile_identifier else None
-                target_p_name = target_p["name"] if target_p else (str(profile_identifier) if profile_identifier else None)
-
-                active_data = {}
-                matched_supervisor = None
-
-                for spid_str, info in data.items():
-                    try:
-                        spid = int(spid_str)
-                        os.kill(spid, 0)
+                    spid = int(spid_str)
+                    if is_process_alive(spid):
                         active_data[spid_str] = info
 
                         # 1. Match by conversation_id if provided
@@ -1009,21 +996,19 @@ class ProfileManager:
                         elif not matched_supervisor and target_p_name:
                             if info.get("profile_name") == target_p_name or str(info.get("profile_id")) == str(profile_identifier):
                                 matched_supervisor = info
-                    except (OSError, ValueError):
-                        pass
+                except (OSError, ValueError):
+                    pass
 
-                # If pruning removed any entries, save cleaned active_data
-                if len(active_data) != len(data):
-                    try:
-                        tmp_file = sup_file.with_suffix(".tmp")
-                        tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
-                        tmp_file.replace(sup_file)
-                    except Exception:
-                        pass
+            # If pruning removed any entries, save cleaned active_data
+            if len(active_data) != len(data):
+                try:
+                    tmp_file = sup_file.with_suffix(".tmp")
+                    tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
+                    tmp_file.replace(sup_file)
+                except Exception:
+                    pass
 
-                return matched_supervisor
-            finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+            return matched_supervisor
 
     def dispatch_relay_to_supervisor(
         self,
@@ -1031,10 +1016,8 @@ class ProfileManager:
         target_profile: str,
         conversation_id: str
     ) -> bool:
-        """Dispatches an in-place relay command to an active SessionRunner supervisor via SIGUSR1."""
-        try:
-            os.kill(target_pid, 0)
-        except OSError:
+        """Dispatches an in-place relay command to an active SessionRunner supervisor via Sentinel file / SIGUSR1."""
+        if not is_process_alive(target_pid):
             return False
 
         cmd_file = self.base_dir / f"relay_cmd_{target_pid}.json"
@@ -1048,7 +1031,11 @@ class ProfileManager:
             tmp_cmd.write_text(json.dumps(cmd_data, ensure_ascii=False), encoding="utf-8")
             tmp_cmd.replace(cmd_file)
 
-            os.kill(target_pid, signal.SIGUSR1)
+            if hasattr(signal, "SIGUSR1"):
+                try:
+                    os.kill(target_pid, signal.SIGUSR1)
+                except Exception:
+                    pass
             return True
         except Exception:
             try:
@@ -1211,10 +1198,7 @@ class ProfileManager:
 
                         # Gracefully terminate old running process if any to unlock SQLite WAL
                         if running_proc and running_proc.get("pid"):
-                            try:
-                                os.kill(running_proc["pid"], signal.SIGINT)
-                            except OSError:
-                                pass
+                            interrupt_process(running_proc["pid"])
 
                         # Send C-c to clear prompt
                         subprocess.run(["herdr", "pane", "send-keys", target_pane_id, "C-c"], capture_output=True, timeout=3)
@@ -1275,10 +1259,7 @@ class ProfileManager:
                         target_pane_id = scored_panes[0][1]
 
                         if running_proc and running_proc.get("pid"):
-                            try:
-                                os.kill(running_proc["pid"], signal.SIGINT)
-                            except OSError:
-                                pass
+                            interrupt_process(running_proc["pid"])
 
                         subprocess.run(["tmux", "send-keys", "-t", target_pane_id, "C-c"], capture_output=True, timeout=3)
                         time.sleep(0.3)

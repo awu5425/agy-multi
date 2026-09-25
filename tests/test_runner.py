@@ -257,7 +257,8 @@ def test_supervisor_registry_and_ipc_dispatch(tmp_path, monkeypatch):
         conversation_id=cid
     )
     assert ok is True
-    assert (current_pid, signal.SIGUSR1) in kill_signals
+    if hasattr(signal, "SIGUSR1"):
+        assert (current_pid, signal.SIGUSR1) in kill_signals
 
     cmd_file = mgr.base_dir / f"relay_cmd_{current_pid}.json"
     assert cmd_file.is_file()

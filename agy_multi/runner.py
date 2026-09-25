@@ -21,6 +21,9 @@ from .utils import (
     sync_profile_environment,
     find_process_running_conversation,
     set_terminal_pane_title,
+    build_profile_env,
+    is_process_alive,
+    interrupt_process,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -56,32 +59,58 @@ class SessionRunner:
         self._external_relay_target: Optional[Dict[str, Any]] = None
         self._external_relay_cid: Optional[str] = None
 
-    def _handle_sigusr1(self, signum, frame):
-        """Handles external relay dispatch from Web Dashboard or IPC."""
-        cmd_file = self.manager.base_dir / f"relay_cmd_{os.getpid()}.json"
-        if cmd_file.is_file():
+    def _interrupt_child(self) -> None:
+        """Cross-platform gentle interrupt or termination of child_proc."""
+        if not self.child_proc or self.child_proc.poll() is not None:
+            return
+        try:
+            if sys.platform == "win32":
+                self.child_proc.terminate()
+            else:
+                self.child_proc.send_signal(signal.SIGINT)
+        except Exception:
             try:
-                data = json.loads(cmd_file.read_text(encoding="utf-8"))
-                cmd_file.unlink(missing_ok=True)
-                target_name = data.get("target_profile")
-                target_p = self.manager.find_profile(target_name)
-                if target_p:
-                    cid = data.get("conversation_id")
-                    self._external_relay_target = target_p
-                    self._external_relay_cid = cid
-                    self._relay_requested = True
-                    self._next_profile = target_p
-                    self._relay_notice = (
-                        f"⚡ 接收到外部接管指令：由 Web 看板调度接力至账号 "
-                        f"[{target_p['name']} (ID: {target_p['id']})]"
-                    )
-                    if self.child_proc and self.child_proc.poll() is None:
-                        try:
-                            self.child_proc.send_signal(signal.SIGINT)
-                        except Exception:
-                            pass
+                self.child_proc.kill()
             except Exception:
                 pass
+
+    def _check_relay_sentinel(self) -> bool:
+        """Checks for external relay Sentinel IPC file (relay_cmd_{pid}.json)."""
+        cmd_file = self.manager.base_dir / f"relay_cmd_{os.getpid()}.json"
+        if not cmd_file.is_file():
+            return False
+
+        try:
+            data = json.loads(cmd_file.read_text(encoding="utf-8"))
+            try:
+                cmd_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            target_name = data.get("target_profile")
+            target_p = self.manager.find_profile(target_name)
+            if target_p:
+                cid = data.get("conversation_id")
+                self._external_relay_target = target_p
+                self._external_relay_cid = cid
+                self._relay_requested = True
+                self._next_profile = target_p
+                self._relay_notice = (
+                    f"⚡ 接收到外部接管指令：由 Web 看板调度接力至账号 "
+                    f"[{target_p['name']} (ID: {target_p['id']})]"
+                )
+                self._interrupt_child()
+                return True
+        except Exception:
+            try:
+                cmd_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return False
+
+    def _handle_sigusr1(self, signum, frame):
+        """Handles external relay dispatch from Web Dashboard or IPC."""
+        self._check_relay_sentinel()
 
     def _extract_conversation_id(self, args: List[str]) -> Optional[str]:
         """Extracts --conversation <cid> or -c <cid> from args if present."""
@@ -96,8 +125,18 @@ class SessionRunner:
         """Background loop monitoring 5H quota and intervening when buffer is breached."""
         burned_buffer = False
         while not self._stop_watchdog.is_set():
-            time.sleep(self.poll_interval)
-            if self._stop_watchdog.is_set():
+            # Slice sleep to poll Sentinel IPC files with high responsiveness (sub-250ms)
+            steps = max(1, int(self.poll_interval / 0.25))
+            interrupted_by_sentinel = False
+            for _ in range(steps):
+                if self._stop_watchdog.is_set():
+                    break
+                if self._check_relay_sentinel():
+                    interrupted_by_sentinel = True
+                    break
+                time.sleep(0.25)
+
+            if interrupted_by_sentinel or self._stop_watchdog.is_set():
                 break
 
             if not self.child_proc or self.child_proc.poll() is not None:
@@ -126,10 +165,7 @@ class SessionRunner:
                     self._relay_requested = True
                     self._next_profile = None
                     self._relay_notice = f"账号 [{curr_profile['name']}] 5H 配额触碰保底 ({g_5h_rem:.1f}%)。自动接管已关闭，温和暂停现场。"
-                    try:
-                        self.child_proc.send_signal(signal.SIGINT)
-                    except Exception:
-                        pass
+                    self._interrupt_child()
                     break
 
                 # Try finding an idle relay candidate
@@ -143,10 +179,7 @@ class SessionRunner:
                     self._relay_requested = True
                     self._next_profile = best_target
                     self._relay_notice = f"账号 [{curr_profile['name']}] 5H 配额触碰保底余量 ({g_5h_rem:.1f}% <= {self.min_buffer_pct:.1f}%)"
-                    try:
-                        self.child_proc.send_signal(signal.SIGINT)
-                    except Exception:
-                        pass
+                    self._interrupt_child()
                     break
                 else:
                     # No target available
@@ -156,10 +189,7 @@ class SessionRunner:
                         self._relay_requested = True
                         self._next_profile = None  # None indicates pause with countdown
                         self._relay_notice = f"账号 [{curr_profile['name']}] 触碰保底 ({g_5h_rem:.1f}%)，且当前无可用空闲账号"
-                        try:
-                            self.child_proc.send_signal(signal.SIGINT)
-                        except Exception:
-                            pass
+                        self._interrupt_child()
                         break
 
     def run(self) -> int:
@@ -195,7 +225,7 @@ class SessionRunner:
             p_id = curr_profile.get("id", "") if curr_profile else ""
             p_tag = f" {p_name} [P{p_id}]" if p_name else ""
             set_terminal_pane_title(f"agy:{p_tag} [idle]")
-            if old_sigusr1 is not None:
+            if old_sigusr1 is not None and hasattr(signal, "SIGUSR1"):
                 try:
                     signal.signal(signal.SIGUSR1, old_sigusr1)
                 except Exception:
@@ -244,15 +274,12 @@ class SessionRunner:
             # Only spawn child process if relay countdown was not triggered immediately
             if not (self._relay_requested and not self._next_profile):
                 pdir = self.manager.get_profile_dir(curr_profile["name"])
-                sync_profile_environment(pdir, self.manager.real_home)
+                self.manager._ensure_profile_links(pdir)
 
-                env = os.environ.copy()
-                env["HOME"] = str(pdir)
-                env["GEMINI_CLI_PROFILE"] = curr_profile["name"]
-                env["GEMINI_CLI_PROFILE_ID"] = str(curr_profile["id"])
-                env["GEMINI_CLI_PROFILE_DIR"] = str(pdir)
+                env = build_profile_env(curr_profile, pdir, self.manager.real_home)
 
-                cmd = ["agy"] + current_args
+                agy_binary = shutil.which("agy") or shutil.which("agy.exe") or "agy"
+                cmd = [agy_binary] + current_args
 
                 # Register active supervisor & set terminal pane title
                 cid = getattr(self, "_external_relay_cid", None) or self._extract_conversation_id(current_args)
@@ -297,7 +324,7 @@ class SessionRunner:
                     print(f"\n{YELLOW}[agy-multi] 接收到用户中断 (Ctrl+C)，正在退出...{RESET}")
                     if self.child_proc:
                         try:
-                            self.child_proc.send_signal(signal.SIGINT)
+                            self._interrupt_child()
                             self.child_proc.wait(timeout=3)
                         except Exception:
                             self.child_proc.kill()

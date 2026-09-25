@@ -6,7 +6,7 @@ Concurrent multi-account isolation & real-time usage dashboard for Google Antigr
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
-[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-green.svg)](https://github.com/awu5425/agy-multi)
+[![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](https://github.com/awu5425/agy-multi)
 [![GitHub stars](https://img.shields.io/github/stars/awu5425/agy-multi?style=social)](https://github.com/awu5425/agy-multi)
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -31,8 +31,9 @@ You're 40 minutes into a deep refactor. Gemini slams into the 5-hour rolling quo
 
 - 🔄 **Quota watchdog + auto-relay** — monitors the official 5-hour rolling quota in the background; on exhaustion it SIGINT-saves, backs up SQLite via the Online Backup API, and relaunches on the idlest account in the exact same terminal.
 - 📊 **Real-time usage dashboard** — 5h/weekly quota bars with second-precision countdowns, token trends with Read / Write / Cache / Thinking breakdowns, GitHub-style activity calendar, one-click EN/中文.
-- 🔒 **True per-account sandboxing** — isolated OAuth tokens, conversation logs and SQLite DB per profile; concurrent terminals never fight over locks. Sensitive dirs (`.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`) excluded by default.
-- 🖥️ **Any terminal, any multiplexer** — tabs, standalone windows, VS Code integrated terminal, tmux, zellij…
+- 🔒 **True per-account sandboxing** — isolated OAuth tokens, conversation logs and SQLite DB per profile (`USERPROFILE` and `HOME` redirection); concurrent terminals never fight over locks. Sensitive dirs (`.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`) excluded by default.
+- 🪟 **Native Windows & Windows Terminal support** — unprivileged NTFS directory junctions (`_winapi.CreateJunction`), Win32 process tracking, cross-platform Sentinel file IPC, and one-command split-pane launching (`agy-multi wt`).
+- 🖥️ **Any terminal, any multiplexer** — Windows Terminal, PowerShell, CMD, tmux, zellij, VS Code integrated terminal…
 
 *Independent community project — not affiliated with Google. See [Disclaimer](#disclaimer--terms-of-service).*
 
@@ -42,13 +43,22 @@ You're 40 minutes into a deep refactor. Gemini slams into the 5-hour rolling quo
 
 ### 1. Install & initialize
 
+**Linux / macOS:**
 ```bash
 git clone https://github.com/awu5425/agy-multi.git
 cd agy-multi
 ./install.sh && agy-multi init
 ```
 
-The wizard imports your existing Antigravity login as Profile 1 (main), walks you through adding secondary accounts, and registers global shortcuts (`agy-1`, `agy-2`, `agy-auto`) in `~/.local/bin`.
+**Windows (PowerShell / Command Prompt / Windows Terminal):**
+```powershell
+git clone https://github.com/awu5425/agy-multi.git
+cd agy-multi
+pip install -e .
+agy-multi init
+```
+
+The wizard imports your existing Antigravity login as Profile 1 (main), walks you through adding secondary accounts, and registers global shortcuts (`agy-1`, `agy-2`, `agy-auto` on Linux/macOS, plus native `.cmd` wrappers on Windows) in `~/.local/bin`.
 
 ### 2. Launch with auto-watchdog
 
@@ -56,6 +66,13 @@ The wizard imports your existing Antigravity login as Profile 1 (main), walks yo
 agy-auto                                            # recommended: auto-picks the best idle account, relays on quota exhaustion
 agy-1                                               # a specific profile
 agy-coder -p "Review unresolved TODOs in this repo"  # any native agy args pass through
+```
+
+**Windows Terminal split-pane / tab launching:**
+```powershell
+agy-multi wt coder --split v    # launch in a vertical split pane
+agy-multi wt coder --split h    # launch in a horizontal split pane
+agy-multi wt coder --tab        # launch in a new tab
 ```
 
 ### 3. Watch your quotas
@@ -84,12 +101,12 @@ agy-multi creds --save    # auto-extract official credentials from local agy bin
 
 1. **Launch & readiness** — `agy-auto` scores every idle profile by available quota and starts on the best one.
 2. **Runtime watchdog** — background monitor polls the official quota API; when remaining quota ≤ your reserve buffer (default 0%, recommended 5%), handover triggers.
-3. **Graceful save** — the session is SIGINT-interrupted, then SQLite is backed up page-by-page via the official Online Backup API. No WAL corruption, no naive file copies.
+3. **Graceful save** — the session is gracefully interrupted, then SQLite is backed up page-by-page via the official Online Backup API. No WAL corruption, no naive file copies.
 4. **Smart target selection** — only profiles with zero active PIDs are eligible; an account busy in another terminal is never picked.
 5. **Seamless relaunch** — conversation DB, metadata and Brain artifacts transfer over; the new session starts in the exact same terminal window.
 6. **Safe exit** — while waiting out a cooldown, the supervisor exits cleanly (code 0) if the session was taken over elsewhere. No split-brain.
 
-> Every relay takes an exclusive `fcntl` file lock (`relay.lock`), so even simultaneous triggers can't race each other.
+> Every relay takes an exclusive cross-platform file lock (`relay.lock` via `msvcrt.locking` on Windows and `fcntl.flock` on POSIX), so even simultaneous triggers can't race each other.
 
 ---
 
@@ -117,7 +134,7 @@ agy-multi serve --host 0.0.0.0 --port 8989 --token YOUR_SECURE_TOKEN  # LAN / ne
 <details>
 <summary><b>🧩 Multi-terminal workflow example</b></summary>
 
-Open sessions in any setup — regular tabs, IDE split terminals, tmux / zellij:
+Open sessions in any setup — regular tabs, IDE split terminals, tmux / zellij, Windows Terminal:
 - **Terminal 1** — `agy-1`: core coding & refactoring
 - **Terminal 2** — `agy-2`: concurrent test runs and code review
 - **Terminal 3** — `agy-3`: deep research and system design
@@ -135,6 +152,7 @@ agy-multi login 1                     # one-time Google OAuth flow (token stored
 agy-multi add coder coder@ex.com -d "Refactoring lead"
 agy-multi edit 2 --name coder-pro --email newcoder@ex.com
 agy-multi run [profile]               # same as agy-auto
+agy-multi wt [profile] [--split v|h]  # launch inside Windows Terminal pane or tab
 agy-multi relay                       # smart auto-relay of the active session
 agy-multi relay --to 2                # targeted relay
 agy-multi relay <cid> --from 1 --to 2 # explicit conversation transfer
@@ -152,15 +170,16 @@ agy-multi usage [--csv] [--html PATH] [--json]
 <details>
 <summary><b>🖥️ Platform support</b></summary>
 
-| Capability | Linux (primary) | macOS (CLI) | Windows native | Desktop GUI apps |
+| Capability | Linux (primary) | Windows native | macOS (CLI) | Desktop GUI apps |
 | :--- | :---: | :---: | :---: | :---: |
-| Profile & token sandboxing | ✅ Full | ⚠️ Basic | ❌ | ❌ |
-| Process & PID tracking | ✅ Native (/proc) | ⚠️ Basic (ps/pgrep, TCC limits) | ❌ | — |
-| 5H quota watchdog & relay | ✅ Full | ⚠️ Basic | ❌ | ❌ |
+| Profile & token sandboxing | ✅ Full | ✅ Full (USERPROFILE & NTFS Junctions) | ⚠️ Basic | ❌ |
+| Process & PID tracking | ✅ Native (/proc) | ✅ Native (Win32 OpenProcess) | ⚠️ Basic (ps/pgrep, TCC limits) | — |
+| 5H quota watchdog & relay | ✅ Full | ✅ Full (Sentinel file IPC) | ⚠️ Basic | ❌ |
+| Windows Terminal split-pane | — | ✅ Full (`agy-multi wt`) | — | — |
 | Web dashboard | ✅ Full | ✅ Full | ✅ Full | ⚠️ CLI logs only |
-| Background daemon | ✅ systemd | ⚠️ Manual launchd | ❌ | ❌ |
+| Background daemon | ✅ systemd | ⚠️ Task Scheduler / NSSM | ⚠️ Manual launchd | ❌ |
 
-> macOS CLI support is experimental and community-driven. Windows users: run inside WSL2 for full parity. Desktop GUI apps (Antigravity 2.0 / IDE) are out of scope — they keep secrets in OS keychains and can't be sandboxed via `$HOME`.
+> Windows native is fully supported with zero external dependencies (utilizing unprivileged NTFS junctions, Win32 API, Sentinel IPC, and Windows Terminal integration). macOS CLI support is experimental. Desktop GUI apps (Antigravity 2.0 / IDE) are out of scope — they keep secrets in OS keychains and can't be sandboxed via `$HOME`.
 
 </details>
 
@@ -175,7 +194,8 @@ agy-multi usage [--csv] [--html PATH] [--json]
 Because you'd lose workspace state and conversation context — and two concurrent sessions on one profile collide on SQLite locks. `agy-multi` gives each account its own sandbox and moves the live conversation over.
 
 ### Does it work on macOS / Windows?
-macOS terminal: experimental. Windows native: not supported — use WSL2.
+- **Windows native**: Fully supported out of the box (PowerShell, Command Prompt, and Windows Terminal split-panes).
+- **macOS terminal**: Experimental community support.
 
 ### What about the Antigravity desktop app / IDE?
 Not supported, CLI only — GUI apps store secrets in OS keychains and can't be controlled via terminal `$HOME` sandboxing or process signals.

@@ -1,0 +1,309 @@
+"""
+Dedicated unit tests for Windows platform support in agy-multi.
+Covers:
+- Safe process liveness checking (OpenProcess / GetExitCodeProcess, avoiding os.kill(pid, 0))
+- NTFS Junction creation and cross-platform link/copy fallbacks
+- Windows USERPROFILE & HOME credential isolation environment
+- Cross-platform file locking with msvcrt.locking
+- Sentinel file IPC relay without POSIX signals
+- Windows Terminal (wt.exe) command synthesis and execution
+- Windows .cmd shortcut generation
+"""
+
+import os
+import sys
+import json
+import time
+import shutil
+import tempfile
+import threading
+import argparse
+from pathlib import Path
+import pytest
+
+from agy_multi.utils import (
+    is_process_alive,
+    interrupt_process,
+    is_link_or_junction,
+    create_cross_platform_link,
+    build_profile_env,
+    file_lock,
+    launch_windows_terminal,
+    set_terminal_pane_title,
+)
+from agy_multi.manager import ProfileManager
+from agy_multi.runner import SessionRunner
+from agy_multi.cli import cmd_install_helpers, cmd_wt
+
+
+def test_is_process_alive_windows_native():
+    """Verifies is_process_alive operates safely on Windows without terminating target."""
+    # Current process MUST be alive
+    current_pid = os.getpid()
+    assert is_process_alive(current_pid) is True
+    # If the bug where os.kill(pid, 0) was called were present, we would have terminated here!
+    # Checking again proves current process was not killed
+    assert is_process_alive(current_pid) is True
+
+    # Invalid / non-existent PIDs
+    assert is_process_alive(0) is False
+    assert is_process_alive(-1) is False
+    assert is_process_alive(99999999) is False
+
+
+def test_create_cross_platform_link_junction(tmp_path):
+    """Verifies NTFS Junction or link creation for directories."""
+    src_dir = tmp_path / "original_dir"
+    src_dir.mkdir()
+    sample_file = src_dir / "test.txt"
+    sample_file.write_text("hello junction", encoding="utf-8")
+
+    dst_dir = tmp_path / "linked_dir"
+
+    ok = create_cross_platform_link(src_dir, dst_dir)
+    assert ok is True
+    assert dst_dir.exists()
+    assert is_link_or_junction(dst_dir) is True
+
+    # Verify content read through link/junction
+    assert (dst_dir / "test.txt").read_text(encoding="utf-8") == "hello junction"
+
+    # Verify write through link/junction propagates
+    (dst_dir / "created_via_dst.txt").write_text("sync", encoding="utf-8")
+    assert (src_dir / "created_via_dst.txt").exists()
+
+    # Re-running on existing dst returns True without error
+    assert create_cross_platform_link(src_dir, dst_dir) is True
+
+
+def test_create_cross_platform_link_file(tmp_path):
+    """Verifies file link or copy fallback."""
+    src_file = tmp_path / "config.json"
+    src_file.write_text('{"key": "value"}', encoding="utf-8")
+
+    dst_file = tmp_path / "sub" / "target.json"
+    ok = create_cross_platform_link(src_file, dst_file)
+    assert ok is True
+    assert dst_file.exists()
+    assert dst_file.read_text(encoding="utf-8") == '{"key": "value"}'
+
+
+def test_build_profile_env():
+    """Verifies environment variables set USERPROFILE and HOME to ensure credential isolation."""
+    profile = {
+        "id": "2",
+        "name": "developer",
+        "email": "dev@company.com",
+    }
+    pdir = Path(r"C:\Profiles\dev") if sys.platform == "win32" else Path("/tmp/profiles/dev")
+    rhome = Path(r"C:\Users\dev") if sys.platform == "win32" else Path("/home/dev")
+
+    env = build_profile_env(profile, pdir, rhome)
+
+    assert env["HOME"] == str(pdir.resolve())
+    if sys.platform == "win32":
+        assert env["USERPROFILE"] == str(pdir.resolve())
+    assert env["AGY_REAL_HOME"] == str(rhome.resolve())
+    assert env["AGY_PROFILE_NAME"] == "developer"
+    assert env["AGY_PROFILE_ID"] == "2"
+    assert env["AGY_PROFILE_EMAIL"] == "dev@company.com"
+    assert env["GEMINI_CLI_PROFILE"] == "developer"
+    assert env["GEMINI_CLI_PROFILE_ID"] == "2"
+    assert env["GEMINI_CLI_PROFILE_DIR"] == str(pdir.resolve())
+
+
+def test_file_lock_concurrency(tmp_path):
+    """Verifies file_lock prevents concurrent access with timeout."""
+    lock_file = tmp_path / "test.lock"
+
+    first_acquired = threading.Event()
+    second_failed = threading.Event()
+    release_first = threading.Event()
+
+    def worker_holder():
+        with file_lock(lock_file, timeout=1.0):
+            first_acquired.set()
+            release_first.wait(timeout=2.0)
+
+    def worker_competitor():
+        first_acquired.wait(timeout=2.0)
+        try:
+            with file_lock(lock_file, timeout=0.1):
+                pass
+        except TimeoutError:
+            second_failed.set()
+
+    t1 = threading.Thread(target=worker_holder)
+    t2 = threading.Thread(target=worker_competitor)
+
+    t1.start()
+    t2.start()
+
+    t2.join(timeout=3.0)
+    release_first.set()
+    t1.join(timeout=3.0)
+
+    assert second_failed.is_set() is True
+
+
+def test_sentinel_ipc_relay_dispatch(tmp_path):
+    """Verifies Sentinel file IPC relay mechanism without relying on SIGUSR1."""
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    mgr.add_profile("src", "src@gmail.com", custom_id="1")
+    mgr.add_profile("tgt", "tgt@gmail.com", custom_id="2")
+
+    runner = SessionRunner(
+        manager=mgr,
+        profile_identifier="src",
+        extra_args=[]
+    )
+
+    # Interrupted flag
+    child_interrupted = []
+    runner._interrupt_child = lambda: child_interrupted.append(True)
+
+    # Create sentinel file for current process PID
+    pid = os.getpid()
+    sentinel_path = base_dir / f"relay_cmd_{pid}.json"
+    sentinel_payload = {
+        "action": "switch",
+        "target_profile": "tgt",
+        "conversation_id": "conv-test-999",
+        "timestamp": time.time(),
+    }
+    sentinel_path.write_text(json.dumps(sentinel_payload), encoding="utf-8")
+    assert sentinel_path.is_file()
+
+    # Trigger sentinel check
+    picked_up = runner._check_relay_sentinel()
+    assert picked_up is True
+    assert runner._relay_requested is True
+    assert runner._next_profile["name"] == "tgt"
+    assert runner._external_relay_cid == "conv-test-999"
+    assert len(child_interrupted) == 1
+    # File should have been consumed
+    assert not sentinel_path.exists()
+
+
+def test_windows_terminal_launcher_args(monkeypatch):
+    """Verifies Windows Terminal argument formatting for split panes and tabs."""
+    captured_commands = []
+
+    def mock_popen(cmd, *args, **kwargs):
+        captured_commands.append(cmd)
+        return None
+
+    monkeypatch.setattr("subprocess.Popen", mock_popen)
+    monkeypatch.setattr("shutil.which", lambda name: "C:\\Fake\\wt.exe" if "wt" in name else None)
+
+    # 1. Vertical split
+    monkeypatch.delenv("WT_SESSION", raising=False)
+    success = launch_windows_terminal(
+        command_args=["python", "-m", "agy_multi.cli", "run", "1"],
+        split="v",
+        new_tab=False,
+        title="agy: 1",
+        cwd=Path(r"C:\test")
+    )
+    assert success is True
+    assert len(captured_commands) == 1
+    cmd = captured_commands[0]
+    assert cmd[0] == "C:\\Fake\\wt.exe"
+    assert "split-pane" in cmd
+    assert "-V" in cmd
+    assert "--title" in cmd
+    assert "agy: 1" in cmd
+    assert cmd[-5:] == ["python", "-m", "agy_multi.cli", "run", "1"]
+
+    # 2. Horizontal split inside existing WT_SESSION
+    captured_commands.clear()
+    monkeypatch.setenv("WT_SESSION", "fake-session-guid")
+    success = launch_windows_terminal(
+        command_args=["python", "-m", "agy_multi.cli", "run", "2"],
+        split="h",
+        new_tab=False,
+        title="agy: 2",
+        cwd=Path(r"C:\test")
+    )
+    assert success is True
+    cmd = captured_commands[0]
+    assert "-w" in cmd
+    assert "0" in cmd
+    assert "split-pane" in cmd
+    assert "-H" in cmd
+
+    # 3. New tab
+    captured_commands.clear()
+    success = launch_windows_terminal(
+        command_args=["python", "-m", "agy_multi.cli", "run", "3"],
+        new_tab=True,
+        title="agy: 3"
+    )
+    assert success is True
+    cmd = captured_commands[0]
+    assert "new-tab" in cmd
+
+
+def test_install_helpers_windows(tmp_path, monkeypatch):
+    """Verifies cmd_install_helpers writes .cmd batch files on Windows."""
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    mgr.add_profile("work", "work@gmail.com", custom_id="1")
+    mgr.add_profile("personal", "personal@gmail.com", custom_id="2")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    args = argparse.Namespace()
+    ret = cmd_install_helpers(mgr, args)
+    assert ret == 0
+
+    local_bin = mock_home / ".local" / "bin"
+    assert (local_bin / "agy-multi").exists()
+    assert (local_bin / "agy-multi.cmd").exists()
+    assert (local_bin / "agy-auto.cmd").exists()
+    assert (local_bin / "agy-1.cmd").exists()
+    assert (local_bin / "agy-work.cmd").exists()
+    assert (local_bin / "agy-2.cmd").exists()
+    assert (local_bin / "agy-personal.cmd").exists()
+
+    content = (local_bin / "agy-1.cmd").read_text(encoding="utf-8")
+    assert "@echo off" in content
+    assert "python -m agy_multi.cli run 1" in content
+
+
+def test_cmd_wt(tmp_path, monkeypatch):
+    """Verifies cmd_wt CLI command integrates with Windows Terminal."""
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    mgr.add_profile("main", "main@gmail.com", custom_id="1")
+
+    wt_calls = []
+
+    def mock_launch_wt(**kwargs):
+        wt_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr("agy_multi.cli.launch_windows_terminal", mock_launch_wt)
+
+    args = argparse.Namespace(identifier="1", split="v", tab=False)
+    ret = cmd_wt(mgr, args)
+    assert ret == 0
+    assert len(wt_calls) == 1
+    assert wt_calls[0]["split"] == "v"
+    assert wt_calls[0]["new_tab"] is False
+    assert "main" in wt_calls[0]["title"]
+
+
+def test_set_terminal_pane_title():
+    """Verifies set_terminal_pane_title executes safely on Windows."""
+    set_terminal_pane_title("agy: test-title")

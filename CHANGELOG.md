@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-25
+
+### Added
+- **原生 Windows 跨平台完整支持 (Native Windows Platform Support)**：
+  - **凭据与环境彻底隔离 (Credential & Profile Isolation)**：Windows 下全面同步设置 `%USERPROFILE%` 与 `%HOME%` 指向 Profile 沙箱目录，解决 Windows 版 `agy.exe` 仅读取 `%USERPROFILE%` 导致多账号凭据串扰的底层痛点，实现 100% 账号隔离。
+  - **NTFS 目录联接免提权支持 (NTFS Directory Junctions)**：采用底层 `_winapi.CreateJunction` 创建目录联接，彻底规避 Windows 普通用户无法创建软链接的权限限制（`WinError 1314: 客户端没有所需的特权`），支持在非管理员环境下秒级共享 skills、mcp、plugins 等配置，并自带优雅的深复制降级保护。
+  - **跨平台安全进程探活 (Safe Process Liveness Checking)**：全面规避 Windows 下 CPython 执行 `os.kill(pid, 0)` 会直接映射为 `TerminateProcess(hProcess, 0)` 导致进程瞬间自杀/猝死的平台深坑。统一采用 Win32 API `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 与 `GetExitCodeProcess` 进行无损安全探活。
+  - **跨平台排他文件锁 (Cross-Platform File Lock)**：实现零外部依赖的 `file_lock` 上下文管理器，Windows 平台基于 `msvcrt.locking`，POSIX 平台基于 `fcntl.flock`，为全局 Supervisor 注册表与接力锁（`relay.lock`）提供坚如磐石的并发防撕裂保护。
+  - **Sentinel 哨兵文件 IPC 接力协议 (Sentinel File IPC Relay)**：针对 Windows 内核缺乏 POSIX 信号机制的问题，重构 IPC 通信为高响应度 Sentinel 哨兵文件机制（`relay_cmd_{pid}.json`），看门狗以 250ms 子切片轮询，实现 Web 看板与后台守护进程对运行中会话的原生秒级自动接力。
+  - **Windows Terminal 原生集成 (`agy-multi wt`)**：新增 `wt` / `split` 命令行，原生集成 `wt.exe`，支持根据 `$WT_SESSION` 自动注入 `-w 0` 复用当前窗口，支持垂直分屏 (`--split v`)、水平分屏 (`--split h`) 与新建标签页 (`--tab`) 极速拉起独立账号会话。
+  - **原生 Windows 批处理快捷脚本生成 (`cmd_install_helpers`)**：在 `~/.local/bin` 中同步生成原生 `.cmd` 快捷调用脚本（`agy-multi.cmd`, `agy-auto.cmd`, `agy-<id>.cmd`, `agy-<name>.cmd`），在 CMD 与 PowerShell 中免敲 `python -m` 直接全局调用。
+  - **Dedicated Windows 单元测试套件 (`tests/test_windows.py`)**：新增 10 项专门针对 Windows 平台特性的自动化测试，覆盖 NTFS Junctions、进程安全探活、USERPROFILE 隔离、msvcrt 并发锁、Sentinel IPC 及 Windows Terminal 命令生成。全量测试用例扩充至 57 项，通过率 100%。
+
 ## [1.4.0] - 2026-09-25
 
 ### Added

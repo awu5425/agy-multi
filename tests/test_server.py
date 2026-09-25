@@ -244,7 +244,8 @@ def test_server_post_relay_auto_switched(test_server, monkeypatch):
             assert data["supervisor"]["pid"] == curr_pid
             assert data["supervisor"]["pane_info"]["herdr_pane_id"] == "wC:p2"
             import signal
-            assert (curr_pid, signal.SIGUSR1) in kill_signals
+            if hasattr(signal, "SIGUSR1"):
+                assert (curr_pid, signal.SIGUSR1) in kill_signals
     finally:
         mgr.unregister_active_supervisor(curr_pid)
 
