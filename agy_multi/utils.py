@@ -81,15 +81,25 @@ def file_lock(lock_file_path: Union[str, Path], timeout: float = 10.0):
                 pass
             f.close()
     else:
-        with open(lp, "w") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        f = open(lp, "w")
+        start_time = time.time()
+        while True:
             try:
-                yield f
-            finally:
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                except Exception:
-                    pass
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError, IOError):
+                if time.time() - start_time >= timeout:
+                    f.close()
+                    raise TimeoutError(f"Could not acquire file lock on {lp} within {timeout}s")
+                time.sleep(0.05)
+        try:
+            yield f
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            f.close()
 
 
 def is_process_alive(pid: int) -> bool:
@@ -1236,7 +1246,7 @@ def find_agy_binary(real_home: Optional[Path] = None) -> str:
         # 1. Look for .exe explicitly in PATH
         for name in ("agy.exe", "antigravity.exe", "jetski.exe"):
             cand = shutil.which(name)
-            if cand and cand.lower().endswith(".exe"):
+            if cand:
                 return cand
         # 2. Check standard LocalAppData installation directory
         local_app = os.environ.get("LOCALAPPDATA", "")

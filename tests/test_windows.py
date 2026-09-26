@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import threading
 import argparse
+import subprocess
 from pathlib import Path
 import pytest
 

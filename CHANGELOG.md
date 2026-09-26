@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **控制台模式与备用屏幕缓冲区自动恢复 (`restore_terminal`)**：彻底根除退出会话时终端无回显、无光标、按键卡死（Terminal 锁死）的底层缺陷。新增 `restore_terminal()`，统一重置 Win32 控制台模式（恢复 `ENABLE_LINE_INPUT`、`ENABLE_ECHO_INPUT` 等）并输出 ANSI 重置序列（`\033[?1049l` 退出备用屏幕、`\033[?25h` 显示光标、`\033[?1000l` 关闭鼠标追踪、`\033[?2004l` 关闭括号粘贴），确保在任何正常退出、主动中断或子进程异常时终端交互 100% 平滑复原；
   - **精准区分主动中断与 429 配额耗尽 (Prevent Exit Hijacking & Wait Deadlock)**：修复用户按 `Ctrl+C` 主动中断（退出码 `130` 或 Windows `0xC000013A`）时，因当前账号配额处于 0% 被 Supervisor 误判为 429 配额崩溃进而劫持退出、陷入无限等待死循环导致无法返回终端命令行与看板（Dash）状态的逻辑缺陷；
   - **Windows 原生可执行文件精准寻址 (`find_agy_binary`) 与进程树清理**：重构二进制寻址，Windows 下严格优先命中原生 `agy.exe`，避开 `.cmd` 批处理脚本避免缺少 `shell=True` 导致的句柄残留；中断子进程时采用 `taskkill /F /T` 确保所有侧车与语言服务子进程整树清理；
-  - **新增 `dash` 命令行别名**：为 `agy-multi usage` 增加 `dash` 别名（支持 `agy-multi dash` 一键查用量与看板）。
+  - **新增 `dash` 命令行别名**：为 `agy-multi usage` 增加 `dash` 别名（支持 `agy-multi dash` 一键查用量与看板）；
+  - **跨平台排他文件锁 Linux 非阻塞超时对齐 (`file_lock`)**：修复 `file_lock` 在 Linux/POSIX 环境下使用阻塞式 `fcntl.flock` 未结合 `LOCK_NB` 与 timeout 导致无法按设定时间抛出 `TimeoutError` 的跨平台缺陷，确保 Linux CI 与 Windows 本地并发锁行为 100% 严格对齐。
 - **Orca 终端客户端原生深度适配 (Orca Terminal Client Native Support)**：
   - **自动打标分屏与标签标题 (Automatic Pane & Tab Title Renaming)**：
     - 自动探测 Orca 客户端运行环境（`TERM_PROGRAM=Orca`、`ORCA_TERMINAL_HANDLE`、`ORCA_TAB_ID`、`ORCA_PANE_KEY`、`ORCA_WORKSPACE_ID` 等）；
