@@ -11,6 +11,7 @@ import time
 import signal
 import threading
 import subprocess
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -24,6 +25,8 @@ from .utils import (
     build_profile_env,
     is_process_alive,
     interrupt_process,
+    restore_terminal,
+    find_agy_binary,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -65,7 +68,19 @@ class SessionRunner:
             return
         try:
             if sys.platform == "win32":
-                self.child_proc.terminate()
+                # Terminate child process tree to release console handles cleanly
+                pid = self.child_proc.pid
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                        check=False,
+                        timeout=2.0
+                    )
+                except Exception:
+                    self.child_proc.terminate()
             else:
                 self.child_proc.send_signal(signal.SIGINT)
         except Exception:
@@ -220,6 +235,7 @@ class SessionRunner:
         try:
             return self._run_loop(curr_profile, current_args)
         finally:
+            restore_terminal()
             self.manager.unregister_active_supervisor(os.getpid())
             p_name = curr_profile.get("name", "") if curr_profile else ""
             p_id = curr_profile.get("id", "") if curr_profile else ""
@@ -273,12 +289,18 @@ class SessionRunner:
 
             # Only spawn child process if relay countdown was not triggered immediately
             if not (self._relay_requested and not self._next_profile):
+                # Proactively refresh token if expired or expiring soon (< 5m)
+                try:
+                    self.manager.refresh_profile_token(curr_profile["name"])
+                except Exception:
+                    pass
+
                 pdir = self.manager.get_profile_dir(curr_profile["name"])
                 self.manager._ensure_profile_links(pdir)
 
                 env = build_profile_env(curr_profile, pdir, self.manager.real_home)
 
-                agy_binary = shutil.which("agy") or shutil.which("agy.exe") or "agy"
+                agy_binary = find_agy_binary(self.manager.real_home if self.manager else None)
                 cmd = [agy_binary] + current_args
 
                 # Register active supervisor & set terminal pane title
@@ -309,6 +331,7 @@ class SessionRunner:
                     self.child_proc = subprocess.Popen(cmd, env=env)
                 except FileNotFoundError:
                     print(f"{RED}Error: 'agy' command not found in PATH.{RESET}")
+                    restore_terminal()
                     return 1
 
                 # Start watchdog thread
@@ -330,9 +353,25 @@ class SessionRunner:
                             self.child_proc.wait(timeout=3)
                         except Exception:
                             self.child_proc.kill()
+                    restore_terminal()
                     return 130
                 finally:
                     self._stop_watchdog.set()
+                    restore_terminal()
+
+                # Detect user interruption from exit code (Windows 0xC000013A, Unix SIGINT 130, SIGTERM 143)
+                is_user_interrupt = exit_code in (
+                    130,
+                    3221225786,   # 0xC000013A (STATUS_CONTROL_C_EXIT)
+                    -1073741510,  # 0xC000013A signed 32-bit int
+                    143,          # SIGTERM
+                    getattr(signal, "SIGINT", 2),
+                    -(getattr(signal, "SIGINT", 2)),
+                )
+                if is_user_interrupt:
+                    print(f"\n{YELLOW}[agy-multi] 接收到用户中断，会话已安全退出。{RESET}")
+                    restore_terminal()
+                    return 130
 
                 # Print clean notice after terminal mode is restored
                 if self._relay_requested and self._relay_notice:
@@ -345,6 +384,7 @@ class SessionRunner:
                 # Case A: Normal clean exit without relay request
                 if not self._relay_requested:
                     if exit_code == 0:
+                        restore_terminal()
                         return 0
                     else:
                         # Non-zero exit: check if caused by quota exhaustion (429)
@@ -363,6 +403,7 @@ class SessionRunner:
                             pass
 
                     if not self._relay_requested:
+                        restore_terminal()
                         return exit_code
 
             # Case C: Relay requested but no target available yet (Pause & Wait for idle account or reset)
@@ -441,6 +482,7 @@ class SessionRunner:
                             self._next_profile = self.manager.find_profile(earliest["name"])
                     except KeyboardInterrupt:
                         print(f"\n{YELLOW}[agy-multi] 用户取消等待。{RESET}")
+                        restore_terminal()
                         return 0
                 else:
                     print(f"\n{YELLOW}[agy-multi] 当前无可用账号且暂无刷新时间，正在等待其他账号释放空闲...{RESET}")
@@ -457,6 +499,7 @@ class SessionRunner:
                                 if running_info:
                                     print(f"\n{CYAN}[agy-multi] ℹ️ 检测到会话 [{target_cid[:8]}...] 已在其他终端/进程 (PID: {running_info['pid']}) 中被接管运行。{RESET}")
                                     print(f"{GREEN}[agy-multi] 本等待进程安全退出，避免后续额度恢复产生并发冲突。{RESET}\n", flush=True)
+                                    restore_terminal()
                                     return 0
 
                                 relay_info = self.manager.get_last_relay_info(target_cid)
@@ -465,6 +508,7 @@ class SessionRunner:
                                         to_p = relay_info.get("to_profile", "其他账号")
                                         print(f"\n{CYAN}[agy-multi] ℹ️ 检测到会话 [{target_cid[:8]}...] 已被接管迁移至账号 [{to_p}]。{RESET}")
                                         print(f"{GREEN}[agy-multi] 本等待进程安全退出，避免后续额度恢复产生并发冲突。{RESET}\n", flush=True)
+                                        restore_terminal()
                                         return 0
 
                             # 2. Check if another account became idle with quota (if auto_relay enabled)
@@ -480,6 +524,7 @@ class SessionRunner:
                                     break
                     except KeyboardInterrupt:
                         print(f"\n{YELLOW}[agy-multi] 用户取消等待。{RESET}")
+                        restore_terminal()
                         return 0
 
             # Case B: Relay requested to a target profile (migrates conversation if needed)

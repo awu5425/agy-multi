@@ -272,3 +272,30 @@ def test_supervisor_registry_and_ipc_dispatch(tmp_path, monkeypatch):
     assert not cmd_file.exists()
 
 
+def test_session_runner_run_loop_spawn(tmp_path, monkeypatch):
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    p = mgr.add_profile("test_user", "user@example.com", custom_id="1")
+
+    runner = SessionRunner(mgr, profile_identifier="1")
+
+    spawned_cmds = []
+
+    class DummyProc:
+        def __init__(self, cmd, **kwargs):
+            spawned_cmds.append(cmd)
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("subprocess.Popen", DummyProc)
+    monkeypatch.setattr(runner, "_watchdog_loop", lambda p: None)
+
+    ret = runner._run_loop(p, ["--test-arg"])
+    assert ret == 0
+    assert any("--test-arg" in cmd for cmd in spawned_cmds)
+
+
+

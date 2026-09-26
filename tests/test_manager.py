@@ -566,3 +566,85 @@ def test_dispatch_relay_to_multiplexer_tmux(tmp_path, monkeypatch):
     assert ["tmux", "send-keys", "-t", "%1", f"agy-multi run 2 --conversation {cid}", "Enter"] in commands_run
     assert ["tmux", "select-pane", "-t", "%1", "-T", f"agy: dst_acc [P2] • {cid[:8]}"] in commands_run
 
+
+def test_login_profile_interactive(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    p = mgr.add_profile("testlogin", "login@example.com", custom_id="1")
+    pdir = mgr.get_profile_dir("testlogin")
+
+    mock_agy = str(tmp_path / "fake_agy")
+    monkeypatch.setattr(shutil, "which", lambda cmd: mock_agy if "agy" in cmd else None)
+    monkeypatch.setattr("agy_multi.manager.set_terminal_pane_title", lambda t: None)
+
+    executed_cmd = []
+    executed_env = {}
+
+    def mock_subprocess_run(cmd, env=None, *args, **kwargs):
+        if cmd and cmd[0] == mock_agy:
+            executed_cmd.extend(cmd)
+            if env:
+                executed_env.update(env)
+            token_path = mgr.get_token_path("testlogin")
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            jwt = "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ImxvZ2luQGV4YW1wbGUuY29tIiwiZXhwIjoyNTI0NjA4MDAwfQ."
+            token_path.write_text(json.dumps({"token": {"id_token": jwt}}), encoding="utf-8")
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+
+    success = mgr.login_profile("1")
+    assert success is True
+    assert executed_cmd == [mock_agy]
+    assert "-p" not in executed_cmd
+    assert executed_env["AGY_PROFILE_NAME"] == "testlogin"
+    assert executed_env["HOME"] == str(pdir.resolve())
+    if sys.platform == "win32":
+        assert executed_env["USERPROFILE"] == str(pdir.resolve())
+        assert executed_env["SSH_CONNECTION"] == "127.0.0.1 0 127.0.0.1 0"
+        assert executed_env["SSH_CLIENT"] == "127.0.0.1 0 0"
+
+
+def test_login_profile_existing_credentials(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    mgr.add_profile("testreauth", "reauth@example.com", custom_id="2")
+
+    token_path = mgr.get_token_path("testreauth")
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    jwt = "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InJlYXV0aEBleGFtcGxlLmNvbSIsImV4cCI6MjUyNDYwODAwMH0."
+    token_path.write_text(json.dumps({"token": {"id_token": jwt}}), encoding="utf-8")
+
+    mock_agy = str(tmp_path / "fake_agy")
+    monkeypatch.setattr(shutil, "which", lambda cmd: mock_agy if "agy" in cmd else None)
+    monkeypatch.setattr("agy_multi.manager.set_terminal_pane_title", lambda t: None)
+
+    # 1. Decline re-auth
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    agy_called = []
+    def mock_subprocess_run_decline(cmd, *a, **kw):
+        if cmd and cmd[0] == mock_agy:
+            agy_called.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run_decline)
+    assert mgr.login_profile("2") is False
+    assert len(agy_called) == 0
+    assert token_path.is_file()
+
+    # 2. Accept re-auth
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    def mock_subprocess_run(cmd, env=None, *args, **kwargs):
+        if cmd and cmd[0] == mock_agy:
+            assert not token_path.is_file()
+            token_path.write_text(json.dumps({"token": {"id_token": jwt}}), encoding="utf-8")
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+    assert mgr.login_profile("2") is True
+
+

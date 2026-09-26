@@ -136,3 +136,61 @@ def test_cmd_creds_save(tmp_path, capsys, monkeypatch):
     assert exit_code_2 == 0
     rc_content_2 = bashrc.read_text(encoding="utf-8")
     assert rc_content_2.count("AGY_OAUTH_CLIENT_ID") == 1
+
+
+def test_refresh_profile_token_and_cmd_refresh(tmp_path, monkeypatch):
+    import json
+    import urllib.request
+    from agy_multi.manager import ProfileManager
+    from agy_multi.cli import cmd_refresh
+
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    p = mgr.add_profile("test_ref", "ref@example.com")
+
+    token_file = mgr.get_token_path("test_ref")
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(json.dumps({
+        "email": "ref@example.com",
+        "token": {
+            "access_token": "old_access_token",
+            "refresh_token": "valid_refresh_token",
+            "expiry": "2020-01-01T00:00:00Z"
+        }
+    }), encoding="utf-8")
+
+    monkeypatch.setenv("AGY_OAUTH_CLIENT_ID", "mock_cid")
+    monkeypatch.setenv("AGY_OAUTH_CLIENT_SECRET", "mock_sec")
+
+    class MockResponse:
+        def __init__(self, data):
+            self._data = data
+        def read(self):
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    mock_resp_json = json.dumps({"access_token": "refreshed_access_token", "expires_in": 3600}).encode("utf-8")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=10: MockResponse(mock_resp_json))
+
+    # Test refresh_profile_token
+    res = mgr.refresh_profile_token("test_ref")
+    assert res["success"] is True
+    assert res["refreshed"] is True
+
+    # Verify updated token file
+    updated_data = json.loads(token_file.read_text(encoding="utf-8"))
+    assert updated_data["token"]["access_token"] == "refreshed_access_token"
+
+    # Second call without force should skip refresh because expiry is now future
+    res_cached = mgr.refresh_profile_token("test_ref", force=False)
+    assert res_cached["success"] is True
+    assert res_cached["refreshed"] is False
+
+    # Test cmd_refresh
+    args_cli = argparse.Namespace(identifier="test_ref", force=True)
+    ret = cmd_refresh(mgr, args_cli)
+    assert ret == 0
+

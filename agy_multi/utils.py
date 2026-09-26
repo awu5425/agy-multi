@@ -255,6 +255,14 @@ def build_profile_env(
     env["HOME"] = pdir_str
     if sys.platform == "win32":
         env["USERPROFILE"] = pdir_str
+        # Keyring isolation on Windows:
+        # agy.exe's go-keyring queries Windows Credential Manager (LegacyGeneric:target=gemini:antigravity),
+        # which is scoped to the Windows OS user (ignoring USERPROFILE / HOME redirection) and leaks
+        # the default user account across profiles.
+        # Setting SSH_CONNECTION triggers agy's shouldBypassKeyring to True, safely forcing agy.exe
+        # to fall back to isolated file tokens in %USERPROFILE%\.gemini\antigravity-cli\antigravity-oauth-token.
+        env.setdefault("SSH_CONNECTION", "127.0.0.1 0 127.0.0.1 0")
+        env.setdefault("SSH_CLIENT", "127.0.0.1 0 0")
     env["AGY_REAL_HOME"] = str(real_home.resolve())
     env["AGY_PROFILE_NAME"] = profile.get("name", "")
     env["AGY_PROFILE_ID"] = str(profile.get("id", ""))
@@ -763,40 +771,55 @@ def get_profile_active_pids(profile_dir: Path) -> List[int]:
     pids = []
     target_home = str(profile_dir.resolve())
 
-    # Scan /proc for Linux
+    # 1. Scan /proc for Linux
     proc = Path("/proc")
-    if not proc.is_dir():
-        return pids
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                # Check exe
+                exe_path = entry / "exe"
+                if not exe_path.is_symlink():
+                    continue
+                exe_target = os.readlink(exe_path)
+                if not (exe_target.endswith("/agy") or "antigravity" in exe_target):
+                    continue
 
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
+                # Check environ
+                environ_path = entry / "environ"
+                if not environ_path.is_file():
+                    continue
+                with open(environ_path, "rb") as f:
+                    env_bytes = f.read()
+                envs = env_bytes.split(b"\x00")
+                for item in envs:
+                    if item.startswith(b"HOME="):
+                        val = item[5:].decode("utf-8", errors="ignore")
+                        if os.path.realpath(val) == os.path.realpath(target_home):
+                            pids.append(int(entry.name))
+                        break
+            except (PermissionError, FileNotFoundError, ProcessLookupError):
+                continue
+            except Exception:
+                continue
+
+    # 2. Cross-platform active supervisor registry (essential on Windows where /proc is absent)
+    sup_file = profile_dir.parent / "active_supervisors.json"
+    if sup_file.is_file():
         try:
-            # Check exe
-            exe_path = entry / "exe"
-            if not exe_path.is_symlink():
-                continue
-            exe_target = os.readlink(exe_path)
-            if not (exe_target.endswith("/agy") or "antigravity" in exe_target):
-                continue
-
-            # Check environ
-            environ_path = entry / "environ"
-            if not environ_path.is_file():
-                continue
-            with open(environ_path, "rb") as f:
-                env_bytes = f.read()
-            envs = env_bytes.split(b"\x00")
-            for item in envs:
-                if item.startswith(b"HOME="):
-                    val = item[5:].decode("utf-8", errors="ignore")
-                    if os.path.realpath(val) == os.path.realpath(target_home):
-                        pids.append(int(entry.name))
-                    break
-        except (PermissionError, FileNotFoundError, ProcessLookupError):
-            continue
+            sup_data = json.loads(sup_file.read_text(encoding="utf-8"))
+            for spid_str, info in sup_data.items():
+                try:
+                    spid = int(spid_str)
+                    if spid not in pids and is_process_alive(spid):
+                        pname = info.get("profile_name")
+                        if pname and pname.lower() == profile_dir.name.lower():
+                            pids.append(spid)
+                except (ValueError, OSError):
+                    pass
         except Exception:
-            continue
+            pass
 
     return pids
 
@@ -1144,5 +1167,99 @@ def launch_windows_terminal(
         return True
     except Exception:
         return False
+
+
+def restore_terminal() -> None:
+    """Restores terminal to normal cooked mode, shows cursor, and exits alternate screen.
+
+    Essential after running interactive TUI applications (like Antigravity / Go term)
+    that may leave the console in RAW mode (no echo, line buffering disabled) or alternate
+    screen buffer, which causes the terminal to appear completely locked up / frozen on exit.
+    """
+    # 1. Universal ANSI terminal reset sequences
+    try:
+        if sys.stdout:
+            # \033[?1049l: Exit alternate screen buffer
+            # \033[?25h: Show cursor
+            # \033[?1000l\033[?1002l\033[?1003l\033[?1006l: Disable mouse tracking
+            # \033[?2004l: Disable bracketed paste mode
+            # \033[0m: Reset all attributes/colors
+            seq = "\033[?1049l\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?2004l\033[0m"
+            sys.stdout.write(seq)
+            sys.stdout.flush()
+    except Exception:
+        pass
+
+    # 2. Windows Console Mode restoration via Win32 API
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            STD_INPUT_HANDLE = -10
+            STD_OUTPUT_HANDLE = -11
+            h_in = ctypes.windll.kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            h_out = ctypes.windll.kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+
+            # Standard Windows console input mode:
+            # ENABLE_PROCESSED_INPUT (0x0001) | ENABLE_LINE_INPUT (0x0002) | ENABLE_ECHO_INPUT (0x0004)
+            # | ENABLE_MOUSE_INPUT (0x0010) | ENABLE_INSERT_MODE (0x0020) | ENABLE_QUICK_EDIT_MODE (0x0040)
+            # | ENABLE_EXTENDED_FLAGS (0x0080) | ENABLE_AUTO_POSITION (0x0100) | ENABLE_VIRTUAL_TERMINAL_INPUT (0x0200)
+            DEFAULT_IN_MODE = 0x01F7
+            ctypes.windll.kernel32.SetConsoleMode(h_in, DEFAULT_IN_MODE)
+
+            # Standard Windows console output mode:
+            # ENABLE_PROCESSED_OUTPUT (0x0001) | ENABLE_WRAP_AT_EOL_OUTPUT (0x0002) | ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x0004)
+            DEFAULT_OUT_MODE = 0x0007
+            ctypes.windll.kernel32.SetConsoleMode(h_out, DEFAULT_OUT_MODE)
+        except Exception:
+            pass
+
+    # 3. Unix termios restoration
+    if sys.platform != "win32":
+        try:
+            import termios
+            if hasattr(sys.stdin, "fileno") and sys.stdin.isatty():
+                fd = sys.stdin.fileno()
+                attrs = termios.tcgetattr(fd)
+                attrs[3] |= (termios.ECHO | termios.ICANON | termios.ISIG)
+                termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        except Exception:
+            pass
+
+
+def find_agy_binary(real_home: Optional[Path] = None) -> str:
+    """Finds the real agy binary executable path, preferring .exe over .cmd on Windows.
+
+    Avoids executing .cmd wrapper batch scripts via subprocess.Popen which lack shell=True
+    and can cause terminal signal forwarding or console handle corruption.
+    """
+    if sys.platform == "win32":
+        # 1. Look for .exe explicitly in PATH
+        for name in ("agy.exe", "antigravity.exe", "jetski.exe"):
+            cand = shutil.which(name)
+            if cand and cand.lower().endswith(".exe"):
+                return cand
+        # 2. Check standard LocalAppData installation directory
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            p = Path(local_app) / "agy" / "bin" / "agy.exe"
+            if p.is_file():
+                return str(p)
+
+    for name in ("agy", "antigravity", "jetski"):
+        cand = shutil.which(name)
+        if cand:
+            if sys.platform == "win32" and Path(cand).suffix.lower() in (".cmd", ".bat"):
+                exe = Path(cand).with_suffix(".exe")
+                if exe.is_file():
+                    return str(exe)
+            return cand
+
+    if real_home:
+        fallback = real_home / ".local" / "bin" / ("agy.exe" if sys.platform == "win32" else "agy")
+        if fallback.is_file():
+            return str(fallback)
+
+    return "agy.exe" if sys.platform == "win32" else "agy"
+
 
 

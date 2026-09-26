@@ -33,6 +33,8 @@ from agy_multi.utils import (
     is_orca_terminal,
     find_orca_binary,
     launch_orca_terminal,
+    restore_terminal,
+    find_agy_binary,
 )
 from agy_multi.manager import ProfileManager
 from agy_multi.runner import SessionRunner
@@ -106,6 +108,8 @@ def test_build_profile_env():
     assert env["HOME"] == str(pdir.resolve())
     if sys.platform == "win32":
         assert env["USERPROFILE"] == str(pdir.resolve())
+        assert env["SSH_CONNECTION"] == "127.0.0.1 0 127.0.0.1 0"
+        assert env["SSH_CLIENT"] == "127.0.0.1 0 0"
     assert env["AGY_REAL_HOME"] == str(rhome.resolve())
     assert env["AGY_PROFILE_NAME"] == "developer"
     assert env["AGY_PROFILE_ID"] == "2"
@@ -493,4 +497,128 @@ def test_dispatch_relay_to_multiplexer_orca(tmp_path, monkeypatch):
     assert res is not None
     assert res["multiplexer"] == "orca"
     assert res["pane_id"] == "term_active"
+
+
+def test_get_profile_active_pids_windows_supervisor(tmp_path, monkeypatch):
+    """Verifies get_profile_active_pids detects active sessions via active_supervisors.json on Windows."""
+    from agy_multi.utils import get_profile_active_pids
+
+    base_dir = tmp_path / "profiles"
+    pdir = base_dir / "my_profile"
+    pdir.mkdir(parents=True, exist_ok=True)
+
+    curr_pid = os.getpid()
+
+    sup_file = base_dir / "active_supervisors.json"
+    sup_file.write_text(json.dumps({
+        str(curr_pid): {
+            "pid": curr_pid,
+            "profile_name": "my_profile",
+            "profile_id": "1",
+            "started_at": time.time()
+        },
+        "999999": {
+            "pid": 999999,
+            "profile_name": "my_profile",
+            "profile_id": "1",
+            "started_at": time.time()
+        }
+    }), encoding="utf-8")
+
+    monkeypatch.setattr("agy_multi.utils.is_process_alive", lambda pid: pid == curr_pid)
+
+    active_pids = get_profile_active_pids(pdir)
+    assert curr_pid in active_pids
+    assert 999999 not in active_pids
+
+
+def test_restore_terminal(monkeypatch):
+    """Verifies restore_terminal outputs ANSI reset sequences and invokes Win32 SetConsoleMode."""
+    written_data = []
+
+    class DummyStdout:
+        def write(self, s):
+            written_data.append(s)
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(sys, "stdout", DummyStdout())
+
+    set_modes = []
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            monkeypatch.setattr(ctypes.windll.kernel32, "SetConsoleMode", lambda handle, mode: set_modes.append(mode) or 1)
+        except Exception:
+            pass
+
+    restore_terminal()
+
+    assert any("\033[?1049l" in s for s in written_data)
+    assert any("\033[?25h" in s for s in written_data)
+    assert any("\033[?2004l" in s for s in written_data)
+
+    if sys.platform == "win32" and set_modes:
+        assert 0x01F7 in set_modes
+        assert 0x0007 in set_modes
+
+
+def test_find_agy_binary_prefers_exe(tmp_path, monkeypatch):
+    """Verifies find_agy_binary resolves to .exe on Windows and avoids .cmd wrappers."""
+    fake_exe = tmp_path / "agy.exe"
+    fake_cmd = tmp_path / "agy.cmd"
+    fake_exe.write_text("binary", encoding="utf-8")
+    fake_cmd.write_text("script", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda name: str(fake_exe) if "exe" in name else str(fake_cmd))
+
+    bin_path = find_agy_binary(real_home=tmp_path)
+    if sys.platform == "win32":
+        assert bin_path.endswith(".exe")
+    else:
+        assert bin_path is not None
+
+
+def test_session_runner_ctrl_c_exit(tmp_path, monkeypatch):
+    """Verifies SessionRunner exits cleanly with 130 on user interrupt (Ctrl+C) without 429 quota loop."""
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    mgr.add_profile("main", "main@gmail.com", custom_id="1")
+
+    runner = SessionRunner(manager=mgr, profile_identifier="1")
+
+    class DummyProc:
+        pid = 12345
+        def wait(self):
+            # Simulate Windows STATUS_CONTROL_C_EXIT
+            return 3221225786
+        def poll(self):
+            return 3221225786
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: DummyProc())
+    terminal_restored = False
+    monkeypatch.setattr("agy_multi.runner.restore_terminal", lambda: None)
+
+    exit_code = runner.run()
+    assert exit_code == 130
+    assert runner._relay_requested is False
+    assert runner._next_profile is None
+
+
+def test_dash_cli_alias(tmp_path, monkeypatch):
+    """Verifies 'agy-multi dash' is recognized as a valid CLI subcommand alias."""
+    from agy_multi.cli import main
+
+    monkeypatch.setattr(sys, "argv", ["agy-multi", "dash", "--json"])
+    called = []
+    monkeypatch.setattr("agy_multi.cli.cmd_usage", lambda mgr, args: called.append(True) or 0)
+    monkeypatch.setattr(sys, "exit", lambda code: called.append(code))
+
+    main()
+    assert called == [True, 0]
+
+
 

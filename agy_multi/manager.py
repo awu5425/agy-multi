@@ -11,7 +11,7 @@ import signal
 import shutil
 import sqlite3
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -19,6 +19,7 @@ from .utils import (
     sync_profile_environment,
     inherit_profile_config,
     inspect_token_file,
+    evaluate_token_expiry,
     get_profile_active_pids,
     detect_real_home,
     find_process_running_conversation,
@@ -28,6 +29,8 @@ from .utils import (
     interrupt_process,
     build_profile_env,
     find_orca_binary,
+    find_agy_binary,
+    restore_terminal,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -434,11 +437,98 @@ class ProfileManager:
             pass
         return True
 
+    def refresh_profile_token(self, identifier: str, force: bool = False) -> Dict[str, Any]:
+        """Refreshes the OAuth access token for a profile if expired or expiring soon (< 5m)."""
+        p = self.find_profile(identifier)
+        if not p:
+            return {"refreshed": False, "success": False, "error": f"Profile '{identifier}' not found"}
+
+        token_file = self.get_token_path(p["name"])
+        if not token_file.is_file():
+            return {"refreshed": False, "success": False, "error": "Token file not found"}
+
+        try:
+            with open(token_file, "r", encoding="utf-8") as f:
+                auth_data = json.load(f)
+        except Exception as e:
+            return {"refreshed": False, "success": False, "error": str(e)}
+
+        token_obj = auth_data.get("token", {})
+        refresh_tok = token_obj.get("refresh_token")
+        if not refresh_tok:
+            return {"refreshed": False, "success": False, "error": "No refresh_token found"}
+
+        if not force:
+            expiry = token_obj.get("expiry")
+            exp_info = evaluate_token_expiry(expiry, has_refresh_token=True)
+            rem_secs = exp_info.get("expires_in_seconds")
+            # If token is still valid for > 5 minutes, no need to refresh
+            if rem_secs is not None and rem_secs > 300:
+                return {"refreshed": False, "success": True, "email": auth_data.get("email")}
+
+        import urllib.request
+        import urllib.parse
+        from .usage import get_oauth_client_credentials
+        client_id, client_secret = get_oauth_client_credentials()
+        if not client_id or not client_secret:
+            from .cli import extract_credentials_from_binary
+            _, bin_cid, bin_sec = extract_credentials_from_binary()
+            if bin_cid and bin_sec:
+                client_id, client_secret = bin_cid, bin_sec
+                os.environ["AGY_OAUTH_CLIENT_ID"] = bin_cid
+                os.environ["AGY_OAUTH_CLIENT_SECRET"] = bin_sec
+
+        if not client_id or not client_secret:
+            return {"refreshed": False, "success": False, "error": "Missing OAuth client credentials"}
+
+        post_data = urllib.parse.urlencode({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_tok,
+            "grant_type": "refresh_token",
+        }).encode("utf-8")
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=post_data)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                new_info = json.loads(resp.read().decode("utf-8"))
+                new_access_token = new_info.get("access_token")
+                if new_access_token:
+                    token_obj["access_token"] = new_access_token
+                    if "expires_in" in new_info:
+                        token_obj["expiry"] = datetime.fromtimestamp(
+                            time.time() + new_info["expires_in"], tz=timezone.utc
+                        ).isoformat()
+                    auth_data["token"] = token_obj
+                    with open(token_file, "w", encoding="utf-8") as f:
+                        json.dump(auth_data, f, indent=2)
+                    try:
+                        token_file.chmod(0o600)
+                    except OSError:
+                        pass
+                    return {"refreshed": True, "success": True, "email": auth_data.get("email")}
+        except urllib.error.HTTPError as e:
+            err_body = ""
+            try:
+                err_body = e.read().decode("utf-8")
+            except Exception:
+                pass
+            return {"refreshed": False, "success": False, "error": f"HTTP {e.code}: {err_body}"}
+        except Exception as e:
+            return {"refreshed": False, "success": False, "error": str(e)}
+
+        return {"refreshed": False, "success": False, "error": "Unknown refresh failure"}
+
     def run_profile(self, identifier: str, agy_args: List[str], exec_replace: bool = True) -> int:
         """Runs agy with the given profile's isolated environment."""
         p = self.find_profile(identifier)
         if not p:
             raise ValueError(f"Profile '{identifier}' not found. Use `agy-multi list` to view profiles.")
+
+        # Proactively refresh token if expired or expiring soon (< 5m)
+        try:
+            self.refresh_profile_token(p["name"])
+        except Exception:
+            pass
 
         pdir = self.get_profile_dir(p["name"])
         # Fast sync symlinks in case new tools/configs were added to real_home
@@ -446,7 +536,7 @@ class ProfileManager:
 
         env = build_profile_env(p, pdir, self.real_home)
 
-        agy_binary = shutil.which("agy") or shutil.which("agy.exe") or str(self.real_home / ".local" / "bin" / "agy")
+        agy_binary = find_agy_binary(self.real_home)
         cmd = [agy_binary] + agy_args
 
         if exec_replace and hasattr(os, "execvpe"):
@@ -456,8 +546,11 @@ class ProfileManager:
             os.execvpe(agy_binary, cmd, env)
             return 0
         else:
-            proc = subprocess.run(cmd, env=env)
-            return proc.returncode
+            try:
+                proc = subprocess.run(cmd, env=env)
+                return proc.returncode
+            finally:
+                restore_terminal()
 
     def login_profile(self, identifier: str) -> bool:
         """Starts agy in interactive login mode for the specified profile."""
@@ -471,7 +564,13 @@ class ProfileManager:
         set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}] (authenticating)")
 
         token_file = self.get_token_path(p["name"])
-        if token_file.exists():
+        candidate_tokens = [
+            token_file,
+            token_file.parent / "jetski-standalone-oauth-token",
+            token_file.parent.parent / "jetski-standalone-oauth-token",
+        ]
+        has_existing = any(f.is_file() for f in candidate_tokens)
+        if has_existing:
             auth = inspect_token_file(token_file)
             print(f"{YELLOW}Warning: Profile '{p['name']}' already has credentials (Email: {auth.get('email')}).{RESET}")
             ans = input(f"Do you want to re-authenticate with {p['email']}? [y/N]: ").strip().lower()
@@ -479,22 +578,31 @@ class ProfileManager:
                 print("Login cancelled.")
                 set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}]")
                 return False
-            # Remove existing token to force OAuth prompt
-            token_file.unlink()
+            # Remove all candidate token files to force fresh OAuth prompt
+            for f in candidate_tokens:
+                if f.is_file():
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
 
         print(f"\n{CYAN}{BOLD}=== Initiating Google OAuth Login for [{p['name']}] ==={RESET}")
         print(f"Target Account Email: {BOLD}{p['email']}{RESET}\n")
-        print("A Google authorization link will be displayed below.")
-        print("Please log in with the corresponding Google AI Pro account in your browser.\n")
+        print("Launching interactive Antigravity CLI session to complete authentication.")
+        print("Please follow the on-screen prompts to log in with your Google account.")
+        print(f"(Once authenticated, exit the session by typing {CYAN}/exit{RESET} or pressing {CYAN}Ctrl+D{RESET})\n")
 
         env = build_profile_env(p, pdir, self.real_home)
-        agy_binary = shutil.which("agy") or shutil.which("agy.exe") or str(self.real_home / ".local" / "bin" / "agy")
+        agy_binary = find_agy_binary(self.real_home)
 
-        # Launch agy in interactive turn to trigger authentication
-        cmd = [agy_binary, "-p", "ping"]
-        subprocess.run(cmd, env=env)
+        # Launch agy in interactive mode (NOT print mode with -p)
+        cmd = [agy_binary]
+        try:
+            subprocess.run(cmd, env=env)
+        finally:
+            restore_terminal()
 
-        # Post-check token
+        # Post-check token across all candidate locations
         auth_after = inspect_token_file(token_file)
         if auth_after["is_valid"]:
             logged_email = auth_after.get("email")
