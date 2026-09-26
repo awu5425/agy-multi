@@ -1,8 +1,8 @@
 # 产品需求与架构设计文档 (PRD)
 
 **项目名称**：`agy-multi` — Antigravity (agy) 多账号并发隔离管理与用量监控系统  
-**文档版本**：与软件 v1.2.0 对齐  
-**更新日期**：2026-09-23  
+**文档版本**：与软件 v1.5.1 对齐  
+**更新日期**：2026-09-26  
 **状态**：已实施 (Implemented)  
 
 ---
@@ -22,7 +22,7 @@ Google Antigravity CLI (`agy`) 是新一代 AI 辅助编程终端工具。在日
 ### 1.3 适用范围与边界 (Scope & Non-Goals)
 1. **仅限 CLI 终端交互环境**：本项目专门为 Antigravity CLI (`agy`) 终端工具定制，**明确不支持**桌面 GUI 应用程序（如 Antigravity 2.0 桌面端或 Antigravity IDE 独立窗口），GUI 应用由系统桌面管理器启动并使用系统级钥匙串，不受终端 `$HOME` 隔离控制。
 2. **严禁反向代理与流量劫持**：本项目坚决不采用任何反向代理、中间人拦截或网络层中转机制。所有模型交互与通信均由原生 `agy` 进程直连，确保使用安全与合规。
-3. **平台适用性**：以 Linux (Ubuntu/Debian/Fedora) 及 Windows WSL2 为主力支持与验证平台；macOS (CLI) 终端因缺少原生 `/proc` 且 Shell/权限机制有差异，定位于实验性/社区支持；Windows 原生环境目前不支持。
+3. **平台适用性**：Linux (Ubuntu/Debian/Fedora) 与 Windows 原生 (PowerShell/CMD/Windows Terminal/Orca) 均为第一级完全正式支持平台（零额外外部依赖，采用免特权 NTFS 目录联接与 Win32 原生进程 API）；macOS (CLI) 终端因缺少原生 `/proc` 且 Shell/权限机制有差异，定位于实验性/社区支持。
 
 ---
 
@@ -154,14 +154,19 @@ Google AI Pro 采用 5 小时滑动窗口（Rolling Window）限制配额。系�
 | 命令 | 参数 | 描述 |
 |:---|:---|:---|
 | `agy-multi list` (或 `ls`) | 无 | 查看所有 Profile 状态、认证邮箱、活跃 PID |
-| `agy-multi usage` (或 `stats`) | `--html [path]`, `--json` | 打印终端统计概览，并自动更新/生成 HTML 看板 |
-| `agy-multi serve` | `--port [P]`, `--host [H]` | 启动实时 Web 监控看板服务（默认 127.0.0.1:8989） |
+| `agy-multi usage` (或 `dash`/`stats`) | `--html [path]`, `--json`, `--csv` | 打印终端统计概览，并自动更新/生成 HTML 看板 |
+| `agy-multi server` (或 `serve`/`web`) | `-d\|--daemon`, `--status`, `--stop`, `--port`, `--host`, `--token` | 启动实时 Web 监控看板服务（支持 Linux systemd 与 Windows 脱机后台常驻） |
 | `agy-multi run` | `<ID\|Name> [agy_args...]` | 在指定 Profile 沙箱中启动 `agy`（支持透传任意原生参数） |
+| `agy-multi tab` (或 `new-tab`) | `[profile] [-p\|--project <dir>]` | 在 Orca 或 Windows Terminal 新建项目独立标签页启动 |
+| `agy-multi split` (或 `wt`) | `[profile] [--split v\|h]` | 在 Orca 或 Windows Terminal 分屏窗格中启动会话 |
+| `agy-multi use` (或 `title`/`switch`) | `[profile]` | 将当前终端分屏/标签页重命名为指定账号（支持 Orca/Herdr/Tmux/ANSI） |
 | `agy-multi login` | `<ID\|Name>` | 触发指定 Profile 的一次性 Google OAuth 浏览器认证 |
-| `agy-multi add` | `<name> <email> [-d desc] [--id ID]` | 注册新 Profile 并初始化沙箱软链 |
+| `agy-multi add` | `<name> <email> [-d desc] [--id ID]` | 注册新 Profile 并初始化沙箱目录 |
+| `agy-multi clone` | `<src> <dst>` | 克隆 Profile 配置（skills/mcp/settings，采用免提权 Junction 或软链） |
 | `agy-multi edit` | `<ID\|Name> [--name N] [--email E] [--region-restricted]` | 修改别名、邮箱、描述，或标记地区受限 |
-| `agy-multi install` | 无 | 生成并同步全局 `agy-N` 快捷命令到 `~/.local/bin` |
+| `agy-multi install` | 无 | 生成并同步全局 `agy-N` 快捷命令与原生 Windows `.cmd` 脚本到 `~/.local/bin` |
 | `agy-multi relay` | `[conversation_id] [--from] [--to]` | 把会话迁到另一个有额度的 Profile 并继续 |
+| `agy-multi refresh` | `[id] [-f\|--force]` | 检查 Token 健康度并主动刷新即将过期的凭据 |
 | `agy-multi config` | `--min-buffer` `--auto-relay` `--on-no-target` | 查看或修改保底余量、自动接管、无目标时的策略 |
 | `agy-multi creds` | `--save` | 从本机 `agy` 发现 OAuth 客户端配置并写到本机环境文件，不写入仓库 |
 
@@ -181,12 +186,26 @@ Google AI Pro 采用 5 小时滑动窗口（Rolling Window）限制配额。系�
 ## 6. 质量保证与测试体系
 
 ### 6.1 自动化测试矩阵 (`pytest`)
-测试在 `tests/test_creds.py`、`tests/test_manager.py`、`tests/test_runner.py`、`tests/test_server.py`、`tests/test_usage.py`。覆盖 Profile 生命周期、会话接力与 SQLite 备份、官方配额可用性（含周额低于 1%）、订阅档解析、看板可见性、OAuth 配置不入库，以及 Dashboard HTTP 鉴权。
+测试在 `tests/test_creds.py`、`tests/test_manager.py`、`tests/test_runner.py`、`tests/test_server.py`、`tests/test_usage.py` 以及专门的 `tests/test_windows.py`。
+共计 **73 个自动化单元测试**，100% PASS，完整覆盖：
+- Profile 生命周期、配置克隆继承与安全边界；
+- 会话接力、SQLite 在线热备份与跨账号迁移；
+- 官方配额可用性判定与 5H/周额停用联动；
+- Web 看板鉴权、候选过滤与就地接力调度；
+- Windows 原生平台特性：NTFS 免特权目录联接、Win32 进程安全探活、`msvcrt` 排他文件并发锁、Sentinel 哨兵文件 IPC、Windows Terminal / Orca 命令行映射及终端退出模式自愈。
 
 ---
 
-## 7. 已交付与尚未做的事
+## 7. 已交付与后续规划
 
-v1.2.0 已经包含：多 Profile 隔离、`agy-auto` 接力、`agy-multi serve`、官方配额与订阅档、账号清单勾选进看板。
+**v1.5.1 已交付核心功能**：
+- Linux & Windows 双平台原生运行支持与 100% 账号凭据沙箱隔离；
+- Orca 客户端与 Windows Terminal 分屏、标签管理与全生命周期自动标题同步；
+- 终端退出模式自愈（`restore_terminal`）与主动中断退出防劫持；
+- 双层平滑就地接力（Supervisor IPC + 终端复用器智能注入）与 Web 看板高科技流光动效；
+- 7×24h 启动与接力前主动 Token 自动刷新与后台守护常驻模式（`-d`）；
+- 全平台 73 项全量自动化测试套件与 GitHub Actions CI/CD 流水线。
 
-尚未做的是配额恢复后的桌面通知或外部 Webhook。本项目仍然不做反向代理。
+**后续规划**：
+- 配额恢复后的系统原生桌面通知或可选 Webhook 广播；
+- 保持纯轻量、零外部运行时依赖的架构哲学，严格杜绝反向代理。

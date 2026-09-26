@@ -7,6 +7,8 @@ Concurrent multi-account isolation & real-time usage dashboard for Google Antigr
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](https://github.com/awu5425/agy-multi)
+[![Release](https://img.shields.io/github/v/release/awu5425/agy-multi?color=green)](https://github.com/awu5425/agy-multi/releases)
+[![Tests](https://img.shields.io/badge/tests-73%20passed-brightgreen.svg)](tests)
 [![GitHub stars](https://img.shields.io/github/stars/awu5425/agy-multi?style=social)](https://github.com/awu5425/agy-multi)
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -152,6 +154,7 @@ agy-multi list | ls                  # profiles, auth status, active PIDs
 agy-multi login 1                     # one-time Google OAuth flow (token stored in the profile sandbox)
 agy-multi add coder coder@ex.com -d "Refactoring lead"
 agy-multi edit 2 --name coder-pro --email newcoder@ex.com
+agy-multi clone 1 newcoder           # clone profile config (skills, mcp, settings) via safe junction/symlink
 agy-multi run [profile]               # same as agy-auto
 agy-multi tab [profile] [-p DIR]       # launch inside a new Orca or Windows Terminal tab (worktree-aware)
 agy-multi split [profile] [--split v|h] # launch inside Orca or Windows Terminal split pane
@@ -161,11 +164,13 @@ agy-multi relay --to 2                # targeted relay
 agy-multi relay <cid> --from 1 --to 2 # explicit conversation transfer
 agy-multi relay --no-exec             # sync session & brain data without launching agy
 agy-multi relay --list-candidates     # quota scores, 5H status, idle state of targets
+agy-multi refresh [id] [-f]           # inspect token health and proactively refresh expired OAuth tokens
 agy-multi config                      # view config
 agy-multi config --min-buffer 5       # reserve buffer % (0–50); accounts at/below it trigger handover
 agy-multi config --on-no-target pause # pause (default: exact countdown, auto-wake) | burn_buffer (spend to 429)
-agy-multi creds [--save]          # inspect or auto-discover & save OAuth credentials for 24/7 background refresh
-agy-multi usage [--csv] [--html PATH] [--json]
+agy-multi creds [--save]              # inspect or auto-discover & save OAuth credentials for 24/7 background refresh
+agy-multi server [-d] [--status] [--stop] # dashboard server (supports background daemon on Linux & Windows)
+agy-multi usage | dash [--csv] [--html PATH] [--json] # CLI summary & HTML dashboard (alias dash)
 ```
 
 </details>
@@ -181,7 +186,7 @@ agy-multi usage [--csv] [--html PATH] [--json]
 | Orca Client pane split & auto-rename | ✅ Full | ✅ Full (`orca terminal rename / split`) | ✅ Full | — |
 | Windows Terminal split-pane | — | ✅ Full (`agy-multi wt / split`) | — | — |
 | Web dashboard | ✅ Full | ✅ Full | ✅ Full | ⚠️ CLI logs only |
-| Background daemon | ✅ systemd | ⚠️ Task Scheduler / NSSM | ⚠️ Manual launchd | ❌ |
+| Background daemon | ✅ systemd / server -d | ✅ Native (server -d) / Task Scheduler | ⚠️ server -d / launchd | ❌ |
 
 > Windows native and Orca client environments are fully supported with zero external dependencies (utilizing unprivileged NTFS junctions, Win32 API, Sentinel IPC, and Orca / Windows Terminal integration). macOS CLI support is experimental. Desktop GUI apps (Antigravity 2.0 / IDE) are out of scope — they keep secrets in OS keychains and can't be sandboxed via `$HOME`.
 

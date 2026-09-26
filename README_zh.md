@@ -7,6 +7,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](https://github.com/awu5425/agy-multi)
+[![Release](https://img.shields.io/github/v/release/awu5425/agy-multi?color=green)](https://github.com/awu5425/agy-multi/releases)
+[![Tests](https://img.shields.io/badge/tests-73%20passed-brightgreen.svg)](tests)
 [![GitHub stars](https://img.shields.io/github/stars/awu5425/agy-multi?style=social)](https://github.com/awu5425/agy-multi)
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -153,6 +155,7 @@ agy-multi list | ls                  # 查看所有 profile、鉴权状态与活
 agy-multi login 1                     # 针对指定账号执行 Google OAuth 授权
 agy-multi add coder coder@ex.com -d "重构负责人"
 agy-multi edit 2 --name coder-pro --email newcoder@ex.com
+agy-multi clone 1 newcoder           # 克隆 Profile 配置（skills/mcp/settings，采用免提权 Junction 或软链）
 agy-multi run [profile]               # 启动账号会话（等同于 agy-auto）
 agy-multi tab [profile] [-p DIR]       # 在 Orca 或 Windows Terminal 新建项目独立标签页启动
 agy-multi split [profile] [--split v|h] # 在 Orca 或 Windows Terminal 分屏窗格中启动
@@ -162,11 +165,13 @@ agy-multi relay --to 2                # 定向接力至指定账号
 agy-multi relay <cid> --from 1 --to 2 # 显式跨账号迁移指定会话
 agy-multi relay --no-exec             # 仅同步会话与 Brain 数据，不启动 agy
 agy-multi relay --list-candidates     # 列出各候选账号的配额得分、5H 状态与空闲情况
+agy-multi refresh [id] [-f]           # 检查 Token 健康度并主动刷新即将过期的凭据
 agy-multi config                      # 查看当前配置
 agy-multi config --min-buffer 5       # 设置保留缓冲配额 % (0–50)；达到阈值即触发交接
 agy-multi config --on-no-target pause # 无可用账号策略：pause (默认：打印倒计时并自动唤醒) | burn_buffer (消耗缓冲至 429)
-agy-multi creds [--save]          # 检查或自动发现并保存 OAuth 客户端凭证（支持 7×24h 后台静默续期）
-agy-multi usage [--csv] [--html PATH] [--json]
+agy-multi creds [--save]              # 检查或自动发现并保存 OAuth 客户端凭证（支持 7×24h 后台静默续期）
+agy-multi server [-d] [--status] [--stop] # 启动看板服务（支持 Linux 与 Windows 脱机后台常驻）
+agy-multi usage | dash [--csv] [--html PATH] [--json] # 终端用量概览与 HTML 看板（别名 dash）
 ```
 
 </details>
@@ -182,7 +187,7 @@ agy-multi usage [--csv] [--html PATH] [--json]
 | Orca 客户端分屏与自动改名 | ✅ 完全支持 | ✅ 完全支持 (`orca terminal rename / split`) | ✅ 完全支持 | — |
 | Windows Terminal 原生分屏 | — | ✅ 完全支持 (`agy-multi wt / split`) | — | — |
 | Web 实时用量看板 | ✅ 完全支持 | ✅ 完全支持 | ✅ 完全支持 | ⚠️ 仅 CLI 日志 |
-| 后台守护进程 | ✅ systemd | ⚠️ 任务计划程序 / NSSM | ⚠️ 手动 launchd | ❌ 不支持 |
+| 后台守护进程 | ✅ systemd / server -d | ✅ 原生支持 (server -d) / 任务计划程序 | ⚠️ server -d / launchd | ❌ 不支持 |
 
 > Windows 原生环境与 Orca 客户端已获得全面支持，零额外第三方依赖（通过无须提权的 NTFS 目录联接、Win32 API、Sentinel 哨兵文件以及 Orca / Windows Terminal 原生集成）。macOS CLI 支持为实验性。桌面 GUI 客户端（Antigravity 2.0 / IDE）不在支持范围内 — 其凭据保存在系统钥匙串中，无法通过终端 `$HOME` 沙箱隔离。
 
