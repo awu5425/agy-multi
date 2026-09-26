@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
-[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-green.svg)](https://github.com/awu5425/agy-multi)
+[![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](https://github.com/awu5425/agy-multi)
 [![GitHub stars](https://img.shields.io/github/stars/awu5425/agy-multi?style=social)](https://github.com/awu5425/agy-multi)
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -29,10 +29,11 @@
 
 ## 核心特性
 
-- 🔄 **配额看门狗 + 自动接力** — 后台监控官方 5 小时滚动配额；配额耗尽瞬间通过 SIGINT 安全保存，利用 SQLite 官方 Online Backup API 逐页备份，并在同一终端自动唤醒最空闲账号继续执行。
+- 🔄 **配额看门狗 + 自动接力** — 后台监控官方 5 小时滚动配额；配额耗尽瞬间安全中断，利用 SQLite 官方 Online Backup API 逐页备份，并在同一终端自动唤醒最空闲账号继续执行。
 - 📊 **实时用量监控看板** — 5 小时 / 周配额进度条与精确到秒的重置倒计时，包含 Read / Write / Cache / Thinking 多维视角的 Token 消耗趋势，GitHub 风格活跃度日历，中英文一键切换。
-- 🔒 **真正的单账号隔离沙箱** — 每个 Profile 拥有独立的 OAuth Token、会话日志与 SQLite 数据库；多终端并发绝无锁冲突。默认严格排除敏感目录（`.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`）。
-- 🖥️ **兼容任意终端与分屏工具** — 普通标签页、独立窗口、VS Code 内置终端、tmux、zellij 等无缝支持。
+- 🔒 **真正的单账号隔离沙箱** — 每个 Profile 拥有独立的 OAuth Token、会话日志与 SQLite 数据库（Windows 同步重定向 `USERPROFILE` 与 `HOME`）；多终端并发绝无锁冲突。默认严格排除敏感目录（`.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`）。
+- 🪟 **原生 Windows、Windows Terminal 与 Orca 客户端深度集成** — 无需管理员权限的 NTFS 目录联接 Junction (`_winapi.CreateJunction`)、Win32 原生进程监控、跨平台 Sentinel 哨兵文件 IPC、终端分屏/新建标签 (`agy-multi split` / `wt`)、分屏标题全自动打标 (`agy-multi use` / `title`) 与 `.cmd` 快捷脚本生成。
+- 🖥️ **兼容任意终端与多路复用器** — 原生适配 Orca 客户端、Windows Terminal、Herdr、Tmux、PowerShell、CMD、VS Code 内置终端等。
 
 *独立的社区开源项目 — 与 Google 无官方关联。详见 [免责与合规声明](#免责与合规声明)。*
 
@@ -42,13 +43,22 @@
 
 ### 1. 安装与初始化
 
+**Linux / macOS:**
 ```bash
 git clone https://github.com/awu5425/agy-multi.git
 cd agy-multi
 ./install.sh && agy-multi init
 ```
 
-向导会自动将你现有的 Antigravity 登录态导入为 Profile 1（主账号），引导添加副账号，并在 `~/.local/bin` 中注册全局快捷别名（`agy-1`, `agy-2`, `agy-auto`）。
+**Windows (PowerShell / 命令提示符 CMD / Windows Terminal / Orca):**
+```powershell
+git clone https://github.com/awu5425/agy-multi.git
+cd agy-multi
+pip install -e .
+agy-multi init
+```
+
+向导会自动将你现有的 Antigravity 登录态导入为 Profile 1（主账号），引导添加副账号，并在 `~/.local/bin` 中注册全局快捷别名（Linux/macOS 下为 `agy-1`, `agy-2`, `agy-auto`，Windows 下同步生成原生 `.cmd` 脚本）。
 
 ### 2. 启动带看门狗守护的会话
 
@@ -56,6 +66,14 @@ cd agy-multi
 agy-auto                                            # 推荐：自动选取最空闲账号启动，配额耗尽自动接力
 agy-1                                               # 启动指定 profile
 agy-coder -p "审查本仓库中未解决的 TODO"              # 原生 agy 参数均可透传
+```
+
+**Windows Terminal / Orca 客户端快速分屏与新建标签页：**
+```powershell
+agy-multi split coder --split v    # 垂直分屏打开 coder 账号（自适应 Orca 或 Windows Terminal）
+agy-multi split coder --split h    # 水平分屏打开 coder 账号
+agy-multi split coder --tab        # 在新标签页打开 coder 账号
+agy-multi use                      # 为当前终端分屏/标签页自动打上活跃账号名称（Orca/Herdr/Tmux/ANSI）
 ```
 
 ### 3. 查看配额与用量
@@ -84,12 +102,12 @@ agy-multi creds --save    # 自动提取官方 OAuth 凭据并写入 ~/.config/a
 
 1. **启动与就绪** — `agy-auto` 依据可用配额综合评分，自动选出最优空闲账号启动。
 2. **运行时看门狗** — 后台监控轮询官方配额接口；当剩余配额 ≤ 设定的保留缓冲值（默认 0%，推荐 5%）时触发交接。
-3. **优雅保存** — 向会话发送 SIGINT 中断信号，随后通过 SQLite 官方 Online Backup API 逐页备份数据库。绝无 WAL 损坏，拒绝粗暴的文件直接复制。
+3. **优雅保存** — 进程安全中断保存，随后通过 SQLite 官方 Online Backup API 逐页备份数据库。绝无 WAL 损坏，拒绝粗暴的文件直接复制。
 4. **智能目标优选** — 仅筛选当前活跃 PID 为 0 的空闲账号；正在其他终端忙碌的账号绝不会被误选。
 5. **无缝重载** — 会话数据库、元数据与 Brain 产物平滑迁移；新会话在同一个终端窗口直接拉起。
 6. **安全退出** — 在等待冷却期间，若发现会话已在其他地方被接管，supervisor 将以状态码 0 干净退出，杜绝脑裂。
 
-> 每次接力均获取排他性 `fcntl` 文件锁 (`relay.lock`)，即使多个触发源同时激活也绝不发生竞态。
+> 每次接力均获取排他性跨平台文件锁（Windows 下基于 `msvcrt.locking`，POSIX 下基于 `fcntl.flock` 控制 `relay.lock`），即使多个触发源同时激活也绝不发生竞态。
 
 ---
 
@@ -118,7 +136,7 @@ agy-multi serve --host 0.0.0.0 --port 8989 --token YOUR_SECURE_TOKEN  # 局域�
 <details>
 <summary><b>🧩 多终端并发工作流示例</b></summary>
 
-在任意终端环境中多开会话（普通标签页、IDE 分屏终端、tmux / zellij）：
+在任意终端环境中多开会话（普通标签页、IDE 分屏终端、Windows Terminal、tmux / zellij）：
 - **终端 1** — `agy-1`：核心代码编写与重构
 - **终端 2** — `agy-2`：并发运行测试与 Code Review
 - **终端 3** — `agy-3`：技术调研与系统架构设计
@@ -136,6 +154,9 @@ agy-multi login 1                     # 针对指定账号执行 Google OAuth �
 agy-multi add coder coder@ex.com -d "重构负责人"
 agy-multi edit 2 --name coder-pro --email newcoder@ex.com
 agy-multi run [profile]               # 启动账号会话（等同于 agy-auto）
+agy-multi tab [profile] [-p DIR]       # 在 Orca 或 Windows Terminal 新建项目独立标签页启动
+agy-multi split [profile] [--split v|h] # 在 Orca 或 Windows Terminal 分屏窗格中启动
+agy-multi use [profile]               # 将当前终端分屏/标签页重命名为指定账号（别名 title/switch）
 agy-multi relay                       # 智能自动接力当前活跃会话
 agy-multi relay --to 2                # 定向接力至指定账号
 agy-multi relay <cid> --from 1 --to 2 # 显式跨账号迁移指定会话
@@ -153,15 +174,17 @@ agy-multi usage [--csv] [--html PATH] [--json]
 <details>
 <summary><b>🖥️ 平台支持矩阵</b></summary>
 
-| 功能 / 特性 | Linux (主力平台) | macOS (CLI) | Windows 原生 | 桌面 GUI 客户端 |
+| 功能 / 特性 | Linux (主力平台) | Windows 原生 | macOS (CLI) | 桌面 GUI 客户端 |
 | :--- | :---: | :---: | :---: | :---: |
-| Profile 与 Token 沙箱隔离 | ✅ 完全支持 | ⚠️ 基础支持 | ❌ 不支持 | ❌ 不支持 |
-| 进程状态与 PID 追踪 | ✅ 原生 (/proc) | ⚠️ 基础 (ps/pgrep, 受 TCC 限制) | ❌ 不支持 | — |
-| 5H 配额看门狗与自动接力 | ✅ 完全支持 | ⚠️ 基础支持 | ❌ 不支持 | ❌ 不支持 |
+| Profile 与 Token 沙箱隔离 | ✅ 完全支持 | ✅ 完全支持 (`USERPROFILE` + NTFS 目录联接) | ⚠️ 基础支持 | ❌ 不支持 |
+| 进程状态与 PID 追踪 | ✅ 原生 (/proc) | ✅ 原生 (Win32 OpenProcess) | ⚠️ 基础 (ps/pgrep, 受 TCC 限制) | — |
+| 5H 配额看门狗与自动接力 | ✅ 完全支持 | ✅ 完全支持 (Sentinel 哨兵文件 IPC) | ⚠️ 基础支持 | ❌ 不支持 |
+| Orca 客户端分屏与自动改名 | ✅ 完全支持 | ✅ 完全支持 (`orca terminal rename / split`) | ✅ 完全支持 | — |
+| Windows Terminal 原生分屏 | — | ✅ 完全支持 (`agy-multi wt / split`) | — | — |
 | Web 实时用量看板 | ✅ 完全支持 | ✅ 完全支持 | ✅ 完全支持 | ⚠️ 仅 CLI 日志 |
-| 后台守护进程 | ✅ systemd | ⚠️ 手动 launchd | ❌ 不支持 | ❌ 不支持 |
+| 后台守护进程 | ✅ systemd | ⚠️ 任务计划程序 / NSSM | ⚠️ 手动 launchd | ❌ 不支持 |
 
-> macOS CLI 支持为实验性并由社区驱动。Windows 用户请在 WSL2 中使用以获得完全一致的体验。桌面 GUI 客户端（Antigravity 2.0 / IDE）不在支持范围内 — 其凭据保存在系统钥匙串中，无法通过终端 `$HOME` 沙箱隔离。
+> Windows 原生环境与 Orca 客户端已获得全面支持，零额外第三方依赖（通过无须提权的 NTFS 目录联接、Win32 API、Sentinel 哨兵文件以及 Orca / Windows Terminal 原生集成）。macOS CLI 支持为实验性。桌面 GUI 客户端（Antigravity 2.0 / IDE）不在支持范围内 — 其凭据保存在系统钥匙串中，无法通过终端 `$HOME` 沙箱隔离。
 
 </details>
 
@@ -176,7 +199,8 @@ agy-multi usage [--csv] [--html PATH] [--json]
 因为重新登录会导致当前工作区状态和对话上下文丢失 — 且两个并发会话在同一个 Profile 下会发生 SQLite 写锁冲突。`agy-multi` 为每个账号分配独立沙箱，并将活跃会话无缝迁移。
 
 ### 是否支持 macOS / Windows？
-macOS 终端：实验性支持。Windows 原生：不支持 — 请在 WSL2 中使用。
+- **Windows 原生**：完全原生支持（支持 PowerShell、CMD、Windows Terminal 分屏与独立窗口，无需 WSL2）。
+- **macOS 终端**：实验性社区支持。
 
 ### 是否支持 Antigravity 桌面应用 / IDE？
 不支持，仅限 CLI — GUI 桌面端将凭据保存在系统钥匙串中，无法通过终端 `$HOME` 沙箱或进程信号进行控制。

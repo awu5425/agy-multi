@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-09-25
+
+### Added
+- **终端控制台模式与退出假死自愈修复 (Terminal Mode & Clean Exit Fix)**：
+  - **控制台模式与备用屏幕缓冲区自动恢复 (`restore_terminal`)**：彻底根除退出会话时终端无回显、无光标、按键卡死（Terminal 锁死）的底层缺陷。新增 `restore_terminal()`，统一重置 Win32 控制台模式（恢复 `ENABLE_LINE_INPUT`、`ENABLE_ECHO_INPUT` 等）并输出 ANSI 重置序列（`\033[?1049l` 退出备用屏幕、`\033[?25h` 显示光标、`\033[?1000l` 关闭鼠标追踪、`\033[?2004l` 关闭括号粘贴），确保在任何正常退出、主动中断或子进程异常时终端交互 100% 平滑复原；
+  - **精准区分主动中断与 429 配额耗尽 (Prevent Exit Hijacking & Wait Deadlock)**：修复用户按 `Ctrl+C` 主动中断（退出码 `130` 或 Windows `0xC000013A`）时，因当前账号配额处于 0% 被 Supervisor 误判为 429 配额崩溃进而劫持退出、陷入无限等待死循环导致无法返回终端命令行与看板（Dash）状态的逻辑缺陷；
+  - **Windows 原生可执行文件精准寻址 (`find_agy_binary`) 与进程树清理**：重构二进制寻址，Windows 下严格优先命中原生 `agy.exe`，避开 `.cmd` 批处理脚本避免缺少 `shell=True` 导致的句柄残留；中断子进程时采用 `taskkill /F /T` 确保所有侧车与语言服务子进程整树清理；
+  - **新增 `dash` 命令行别名**：为 `agy-multi usage` 增加 `dash` 别名（支持 `agy-multi dash` 一键查用量与看板）；
+  - **跨平台排他文件锁 Linux 非阻塞超时对齐 (`file_lock`)**：修复 `file_lock` 在 Linux/POSIX 环境下使用阻塞式 `fcntl.flock` 未结合 `LOCK_NB` 与 timeout 导致无法按设定时间抛出 `TimeoutError` 的跨平台缺陷，确保 Linux CI 与 Windows 本地并发锁行为 100% 严格对齐。
+- **Orca 终端客户端原生深度适配 (Orca Terminal Client Native Support)**：
+  - **自动打标分屏与标签标题 (Automatic Pane & Tab Title Renaming)**：
+    - 自动探测 Orca 客户端运行环境（`TERM_PROGRAM=Orca`、`ORCA_TERMINAL_HANDLE`、`ORCA_TAB_ID`、`ORCA_PANE_KEY`、`ORCA_WORKSPACE_ID` 等）；
+    - 优先联动调用 Orca 官方 CLI（`orca terminal rename [--terminal <handle>] --title <title>`），实现全生命周期自动同步（登录、会话启动、空闲打标、会话切片、手动 `agy-multi use`）；
+    - Windows 下使用 `CREATE_NO_WINDOW` 零闪烁静默调用。
+  - **Orca 原生分屏与独立项目标签页 (`agy-multi tab` / `split` / `wt`)**：
+    - 新增头等公民命令 `agy-multi tab [profile] [-p/--project <path>]`（别名 `new-tab`），一键在 Orca 顶部为指定代码仓库/工作区（Worktree）新建独立标签页；
+    - `launch_orca_terminal` 原生对接 Orca Worktree 选择器（`--worktree path:<cwd>`），并在路径非 Orca 工作区时自动降级至 `--worktree active`；
+    - 保留 `agy-multi split [profile] [--split v|h]` 专用于当前终端面板的横纵向分屏；
+    - 针对 Windows Terminal (`wt.exe`) 实现 100% 同等语义参数自适应映射（`-d <path>`）。
+  - **Orca 客户端 Tier 2 多路复用器自动接力调度 (Multiplexer Injection Relay)**：
+    - 在 `SessionRunner` 启动时自动将 `ORCA_TERMINAL_HANDLE` 与 `ORCA_TAB_ID` 登记至全局活跃 Supervisor 注册表；
+    - 支持通过 `orca terminal list --json` 智能评分匹配目标窗格（精准权衡 `ORCA_TERMINAL_HANDLE` 1000 分满分匹配、会话前缀、账号标识、工作区工作路径）；
+    - 支持向目标窗格调度中断（`orca terminal send --terminal <handle> --interrupt`）与注入续跑指令（`orca terminal send --text ... --enter`）并自动改名。
+  - **Windows 中文代码页 (GBK / CP936) 编解码鲁棒性修复**：
+    - 入口处统一对 `sys.stdout` 与 `sys.stderr` 重置 UTF-8 编码与 `errors="replace"`，彻底根除打印 `✓`、`●` 等特殊 Unicode 字符时的 `UnicodeEncodeError`；
+    - 所有调用外部命令读取 JSON（`subprocess.run(..., text=True)`）严格指定 `encoding="utf-8", errors="replace"`，防止 Orca 输出 UTF-8 字符时在 Windows 默认 GBK 编码下触发 `UnicodeDecodeError`。
+- **交互式 OAuth 登录修复 (Interactive OAuth Login Fix)**：
+  - 修复 `agy-multi login` 误传 `-p ping` 参数导致 Headless 模式下命令权限被拒（`jetski: no output produced — a tool required the "command" permission...`）的缺陷；
+  - 移除 Headless 模式参数，直接以标准交互式 CLI 唤起 Antigravity 登录会话；
+  - 扩展多路径候选 Token 探测机制（支持 `.gemini/antigravity-cli/` 与 `.gemini/` 下的 `antigravity-oauth-token` 及 `jetski-standalone-oauth-token`），并在重新认证时彻底清理所有候选旧凭据以强制触发全新浏览器授权。
+- **Windows Credential Manager 多账号凭据穿透根治与 Keyring 旁路隔离 (Windows Keyring Bypass Isolation)**：
+  - 深度逆向 `agy.exe` 底层凭据机制：发现 Windows 下 Go 模块 `zalando/go-keyring` 直接调用 Win32 API 读写系统全局 Windows 凭据管理器（`LegacyGeneric:target=gemini:antigravity`），该凭据隶属 Windows OS 用户域，绕过 `%USERPROFILE%` 与 `%HOME%` 目录重定向，导致多开时强制复用系统默认账号；
+  - 在 `build_profile_env` 中针对 Windows 环境自适应注入 Keyring 旁路环境变量（`SSH_CONNECTION="127.0.0.1 0 127.0.0.1 0"`、`SSH_CLIENT="127.0.0.1 0 0"`），精确激活 `agy.exe` 内部的 `shouldBypassKeyring` 回退机制；
+  - 强制 `agy.exe` 100% 降级至 Profile 沙箱内独立的基于文件存储的 Token（`%USERPROFILE%\.gemini\antigravity-cli\antigravity-oauth-token`），彻底根除 Windows 多账号多开凭据穿透泄漏隐患。
+- **全平台 Token 24/7 自动无感续期与自愈机制 (24/7 Auto Token Refresh & Pre-run Self-Healing)**：
+  - **Windows 二进制路径精准自愈**：重构 `extract_credentials_from_binary`，解决 Windows 平台下 `which` 命中 `agy.cmd` 批处理脚本导致无法提取 OAuth Client ID / Secret 的缺陷；自动探测并定位真实的 `agy.exe` 及 `~\AppData\Local\agy\bin\agy.exe`；
+  - **用户环境变量持久化**：Windows 下 `creds --save` 同步调用 `setx` 注册 Windows 用户级环境变量，彻底对齐 Linux 的 `~/.bashrc` 机制；
+  - **启动与接力前主动刷新拦截 (Pre-Run Proactive Refresh)**：在 `manager.run_profile` 与 `SessionRunner` 每次拉起 `agy.exe` 前，主动检测当前账号 Access Token 是否过期（或剩余有效时间 < 5分钟）；如已过期则自动调用 Google OAuth 刷新端点换取全新 Token 并写入磁盘，彻底杜绝拉起会话时因 Token 过期被踢出的问题；
+  - **新增主动刷新命令行 (`agy-multi refresh [id] [-f]`)**：支持用户随时手动刷新全量或指定账号凭据并展示到期健康度。
+- **看板服务后台守护运行支持 (Dashboard Server Background Daemon Mode)**：
+  - 新增 `agy-multi server -d`（或 `--daemon`）：在 Windows 下采用 `CREATE_NO_WINDOW | DETACHED_PROCESS` 脱机静默拉起后台常驻服务，完全解放当前终端窗口；
+  - 增加命令别名扩展（`agy-multi server` / `serve` / `web` 全语义对齐）；
+  - 配套提供 `agy-multi server --status`（查看后台服务 PID 与监听状态）和 `agy-multi server --stop`（一键平滑安全停服）。
+- **Windows 跨平台活跃会话与接力状态识别适配 (Windows Active Process & Relay State Adaptation)**：
+  - 在 `get_profile_active_pids` 中新增对 `active_supervisors.json` 注册表与存活状态的交叉校验；
+  - 彻底根除 Windows 操作系统因缺乏 `/proc` 文件系统导致子进程识别恒为空、Web 看板账号接力按钮被误判为空闲而恒久置灰禁用的缺陷。
+- **Windows TCP 套接字异常中止根治 (Windows Socket WinError 10053 Fix)**：
+  - 在看板 HTTP 服务的 `_send_unauthorized` 中主动排空未读的 POST 请求体；
+  - 彻底根除 Windows Winsock 在关闭连接时因接收缓冲区残留未读数据发送 TCP RST 导致的 `[WinError 10053] 你的主机中的软件中止了一个已建立的连接 (WSAECONNABORTED)` 异常。
+
+## [1.5.0] - 2026-09-25
+
+### Added
+- **原生 Windows 跨平台完整支持 (Native Windows Platform Support)**：
+  - **凭据与环境彻底隔离 (Credential & Profile Isolation)**：Windows 下全面同步设置 `%USERPROFILE%` 与 `%HOME%` 指向 Profile 沙箱目录，解决 Windows 版 `agy.exe` 仅读取 `%USERPROFILE%` 导致多账号凭据串扰的底层痛点，实现 100% 账号隔离。
+  - **NTFS 目录联接免提权支持 (NTFS Directory Junctions)**：采用底层 `_winapi.CreateJunction` 创建目录联接，彻底规避 Windows 普通用户无法创建软链接的权限限制（`WinError 1314: 客户端没有所需的特权`），支持在非管理员环境下秒级共享 skills、mcp、plugins 等配置，并自带优雅的深复制降级保护。
+  - **跨平台安全进程探活 (Safe Process Liveness Checking)**：全面规避 Windows 下 CPython 执行 `os.kill(pid, 0)` 会直接映射为 `TerminateProcess(hProcess, 0)` 导致进程瞬间自杀/猝死的平台深坑。统一采用 Win32 API `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 与 `GetExitCodeProcess` 进行无损安全探活。
+  - **跨平台排他文件锁 (Cross-Platform File Lock)**：实现零外部依赖的 `file_lock` 上下文管理器，Windows 平台基于 `msvcrt.locking`，POSIX 平台基于 `fcntl.flock`，为全局 Supervisor 注册表与接力锁（`relay.lock`）提供坚如磐石的并发防撕裂保护。
+  - **Sentinel 哨兵文件 IPC 接力协议 (Sentinel File IPC Relay)**：针对 Windows 内核缺乏 POSIX 信号机制的问题，重构 IPC 通信为高响应度 Sentinel 哨兵文件机制（`relay_cmd_{pid}.json`），看门狗以 250ms 子切片轮询，实现 Web 看板与后台守护进程对运行中会话的原生秒级自动接力。
+  - **Windows Terminal 原生集成 (`agy-multi wt`)**：新增 `wt` / `split` 命令行，原生集成 `wt.exe`，支持根据 `$WT_SESSION` 自动注入 `-w 0` 复用当前窗口，支持垂直分屏 (`--split v`)、水平分屏 (`--split h`) 与新建标签页 (`--tab`) 极速拉起独立账号会话。
+  - **原生 Windows 批处理快捷脚本生成 (`cmd_install_helpers`)**：在 `~/.local/bin` 中同步生成原生 `.cmd` 快捷调用脚本（`agy-multi.cmd`, `agy-auto.cmd`, `agy-<id>.cmd`, `agy-<name>.cmd`），在 CMD 与 PowerShell 中免敲 `python -m` 直接全局调用。
+  - **Dedicated Windows 单元测试套件 (`tests/test_windows.py`)**：新增 10 项专门针对 Windows 平台特性的自动化测试，覆盖 NTFS Junctions、进程安全探活、USERPROFILE 隔离、msvcrt 并发锁、Sentinel IPC 及 Windows Terminal 命令生成。全量测试用例扩充至 57 项，通过率 100%。
+
 ## [1.4.0] - 2026-09-25
 
 ### Added

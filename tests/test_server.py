@@ -244,7 +244,8 @@ def test_server_post_relay_auto_switched(test_server, monkeypatch):
             assert data["supervisor"]["pid"] == curr_pid
             assert data["supervisor"]["pane_info"]["herdr_pane_id"] == "wC:p2"
             import signal
-            assert (curr_pid, signal.SIGUSR1) in kill_signals
+            if hasattr(signal, "SIGUSR1"):
+                assert (curr_pid, signal.SIGUSR1) in kill_signals
     finally:
         mgr.unregister_active_supervisor(curr_pid)
 
@@ -324,6 +325,71 @@ def test_server_relay_candidates_excludes_hidden_accounts(test_server, monkeypat
         candidate_names = [c["name"] for c in data.get("candidates", [])]
         assert "board_acc" in candidate_names
         assert "hidden_acc" not in candidate_names
+
+
+def test_cli_server_alias(monkeypatch):
+    """Verifies that 'server' and 'web' command aliases map to cmd_serve."""
+    import sys
+    from agy_multi.cli import main
+
+    called = []
+    monkeypatch.setattr("agy_multi.cli.cmd_serve", lambda mgr, args: called.append(args.command) or 0)
+
+    for alias in ["serve", "server", "web"]:
+        called.clear()
+        monkeypatch.setattr(sys, "argv", ["agy-multi", alias])
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 0
+        assert len(called) == 1
+
+
+def test_cmd_serve_daemon_status_stop(tmp_path, monkeypatch):
+    """Verifies that cmd_serve handles --daemon, --status, and --stop correctly."""
+    import argparse
+    from agy_multi.cli import cmd_serve
+
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    pid_file = base_dir / "dashboard_server.pid"
+
+    # 1. Daemon launch
+    class MockPopen:
+        def __init__(self, *args, **kwargs):
+            self.pid = 98765
+        def poll(self):
+            return None
+
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **kw: MockPopen())
+    monkeypatch.setattr("agy_multi.cli.is_process_alive", lambda pid: True)
+    interrupted_pids = []
+    monkeypatch.setattr("agy_multi.cli.interrupt_process", lambda pid: interrupted_pids.append(pid) or True)
+
+    args_daemon = argparse.Namespace(
+        daemon=True, stop=False, status=False, host="127.0.0.1", port=8989, lan=False, token=None
+    )
+    res = cmd_serve(mgr, args_daemon)
+    assert res == 0
+    assert pid_file.is_file()
+    assert pid_file.read_text(encoding="utf-8").strip() == "98765"
+
+    # 2. Status
+    args_status = argparse.Namespace(
+        daemon=False, stop=False, status=True, host="127.0.0.1", port=8989, lan=False, token=None
+    )
+    res_status = cmd_serve(mgr, args_status)
+    assert res_status == 0
+
+    # 3. Stop
+    args_stop = argparse.Namespace(
+        daemon=False, stop=True, status=False, host="127.0.0.1", port=8989, lan=False, token=None
+    )
+    res_stop = cmd_serve(mgr, args_stop)
+    assert res_stop == 0
+    assert not pid_file.exists()
+    assert 98765 in interrupted_pids
+
+
 
 
 

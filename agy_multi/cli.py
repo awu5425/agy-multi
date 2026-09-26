@@ -9,13 +9,19 @@ import time
 import json
 import shutil
 import re
+import subprocess
 import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .manager import ProfileManager
-from .utils import BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET, load_env_config, detect_real_home, set_terminal_pane_title
+from .utils import (
+    BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET,
+    load_env_config, detect_real_home, set_terminal_pane_title,
+    launch_windows_terminal, is_orca_terminal, launch_orca_terminal,
+    is_process_alive, interrupt_process
+)
 
 
 
@@ -595,19 +601,62 @@ def cmd_run(manager: ProfileManager, args: argparse.Namespace, remaining_args: L
 
 def extract_credentials_from_binary() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Inspects installed Antigravity CLI binary to extract built-in Google OAuth credentials."""
-    bin_path = shutil.which("agy") or shutil.which("antigravity")
-    if not bin_path or not os.path.isfile(bin_path):
-        return None, None, None
-    try:
-        with open(bin_path, "rb") as bf:
-            data = bf.read()
-        cid_match = re.search(rb"(107[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com)", data)
-        sec_match = re.search(rb"(GOCSPX-[A-Za-z0-9_-]{28})", data)
-        cid = cid_match.group(1).decode("utf-8") if cid_match else None
-        sec = sec_match.group(1).decode("utf-8") if sec_match else None
-        return bin_path, cid, sec
-    except Exception:
-        return bin_path, None, None
+    candidates = []
+
+    # Priority 1: Scan PATH entries in order
+    path_dirs = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+
+    for p in path_dirs:
+        p_dir = Path(p)
+        if not p_dir.is_dir():
+            continue
+        # Names to check in order: on Windows prefer .exe to avoid .cmd wrappers,
+        # but also check extensionless names for POSIX and test mocks.
+        check_names = (
+            ("agy.exe", "antigravity.exe", "jetski.exe", "agy", "antigravity", "jetski")
+            if sys.platform == "win32"
+            else ("agy", "antigravity", "jetski")
+        )
+        for name in check_names:
+            f = p_dir / name
+            if f.is_file() and not f.name.lower().endswith((".cmd", ".bat")):
+                candidates.append(str(f))
+
+    # Priority 2: Standard which (resolve .cmd/.bat to sibling .exe if present)
+    for name in ("agy", "antigravity", "jetski"):
+        cand = shutil.which(name)
+        if cand and Path(cand).is_file():
+            c_path = Path(cand)
+            if c_path.suffix.lower() in (".cmd", ".bat"):
+                exe = c_path.with_suffix(".exe")
+                if exe.is_file():
+                    candidates.append(str(exe))
+            else:
+                candidates.append(str(c_path))
+
+    # De-duplicate while preserving order
+    seen = set()
+    unique_candidates = []
+    for c in candidates:
+        norm = os.path.normcase(os.path.abspath(c))
+        if norm not in seen:
+            seen.add(norm)
+            unique_candidates.append(c)
+
+    for bin_path in unique_candidates:
+        try:
+            with open(bin_path, "rb") as bf:
+                data = bf.read()
+            cid_match = re.search(rb"(107[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com)", data)
+            sec_match = re.search(rb"(GOCSPX-[A-Za-z0-9_-]{28})", data)
+            if cid_match and sec_match:
+                cid = cid_match.group(1).decode("utf-8")
+                sec = sec_match.group(1).decode("utf-8")
+                return bin_path, cid, sec
+        except Exception:
+            continue
+
+    return (unique_candidates[0] if unique_candidates else None), None, None
 
 
 def cmd_creds(manager: ProfileManager, args: argparse.Namespace) -> int:
@@ -669,9 +718,6 @@ def cmd_creds(manager: ProfileManager, args: argparse.Namespace) -> int:
 
     # Save to ~/.config/agy-multi/env and update ~/.bashrc
     target_homes = [manager.real_home] if manager else [detect_real_home()]
-    current_home = Path.home().resolve()
-    if current_home not in target_homes:
-        target_homes.append(current_home)
 
     for h in target_homes:
         env_dir = h / ".config" / "agy-multi"
@@ -708,19 +754,62 @@ def cmd_creds(manager: ProfileManager, args: argparse.Namespace) -> int:
 
     os.environ["AGY_OAUTH_CLIENT_ID"] = active_cid
     os.environ["AGY_OAUTH_CLIENT_SECRET"] = active_sec
+
+    # On Windows, register persistent user environment variables via setx when targeting real user home
+    if sys.platform == "win32" and not os.environ.get("AGY_REAL_HOME"):
+        try:
+            subprocess.run(["setx", "AGY_OAUTH_CLIENT_ID", active_cid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(["setx", "AGY_OAUTH_CLIENT_SECRET", active_sec], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            print(f"{GREEN}✓ Registered persistent Windows User Environment Variables via setx{RESET}")
+        except Exception:
+            pass
+
     print(f"\n{BOLD}{GREEN}✓ Configuration saved successfully! Background token refresh is active.{RESET}\n")
     return 0
+
+
+def cmd_refresh(manager: ProfileManager, args: argparse.Namespace) -> int:
+    identifier = getattr(args, "identifier", None)
+    force = getattr(args, "force", False)
+
+    profiles = [manager.find_profile(identifier)] if identifier else manager.list_profiles()
+    if not profiles or not profiles[0]:
+        print(f"{RED}Error: Profile '{identifier}' not found.{RESET}")
+        return 1
+
+    print(f"\n{BOLD}{CYAN}=== Google OAuth Token Refresh ==={RESET}\n")
+    all_ok = True
+    for p in profiles:
+        res = manager.refresh_profile_token(p["name"], force=force)
+        name_str = f"[{p['id']}] {p['name']}"
+        if res.get("refreshed"):
+            print(f"  {GREEN}✓{RESET} {BOLD}{name_str}{RESET}: Access token refreshed successfully! ({res.get('email', p['email'])})")
+        elif res.get("success"):
+            print(f"  {CYAN}✓{RESET} {BOLD}{name_str}{RESET}: Token is already valid (no refresh needed).")
+        else:
+            print(f"  {YELLOW}○{RESET} {BOLD}{name_str}{RESET}: Cannot refresh - {res.get('error')}")
+            all_ok = False
+    print()
+    return 0 if all_ok else 1
 
 
 
 
 def cmd_use(manager: ProfileManager, args: argparse.Namespace) -> int:
     """Explicitly sets the current terminal pane & tab title to represent a specific profile."""
-    profile = manager.find_profile(args.identifier)
-    if not profile:
-        print(f"{RED}Error: Profile '{args.identifier}' not found.{RESET}")
-        print("Run `agy-multi list` to see available profiles.")
-        return 1
+    identifier = getattr(args, "identifier", None)
+    if not identifier:
+        target = manager.get_active_or_recent_profile() or (manager.list_profiles()[0] if manager.list_profiles() else None)
+        if not target:
+            print(f"{RED}Error: No profiles configured.{RESET}")
+            return 1
+        profile = target
+    else:
+        profile = manager.find_profile(identifier)
+        if not profile:
+            print(f"{RED}Error: Profile '{identifier}' not found.{RESET}")
+            print("Run `agy-multi list` to see available profiles.")
+            return 1
 
     status_tag = ""
     auth_status = profile.get("auth", {})
@@ -730,7 +819,15 @@ def cmd_use(manager: ProfileManager, args: argparse.Namespace) -> int:
     new_title = f"agy: {profile['name']} [P{profile['id']}]{status_tag}"
     set_terminal_pane_title(new_title)
 
-    print(f"\n{GREEN}{BOLD}✓ Terminal Pane & Tab Title Updated:{RESET} {BOLD}{new_title}{RESET}")
+    env_label = ""
+    if is_orca_terminal():
+        env_label = " (Orca)"
+    elif os.environ.get("HERDR_PANE_ID"):
+        env_label = " (Herdr)"
+    elif os.environ.get("TMUX"):
+        env_label = " (Tmux)"
+
+    print(f"\n{GREEN}{BOLD}✓ Terminal Pane & Tab Title Updated{env_label}:{RESET} {BOLD}{new_title}{RESET}")
     print(f"  Account  : [{profile['id']}] {profile['name']} ({profile['email']})")
     if auth_status.get("is_valid"):
         print(f"  Auth     : {GREEN}● Logged In{RESET}")
@@ -963,15 +1060,202 @@ exec "{main_bin}" run "{p['name']}" "$@"
         shortcut_name.chmod(0o755)
         print(f"{GREEN}✓ Installed shortcut: {shortcut_name} -> {p['email']}{RESET}")
 
+    # 4. On Windows, also generate native .cmd wrappers
+    if sys.platform == "win32":
+        main_cmd = local_bin / "agy-multi.cmd"
+        with open(main_cmd, "w", encoding="utf-8") as f:
+            f.write("@echo off\r\npython -m agy_multi.cli %*\r\n")
+        print(f"{GREEN}✓ Installed Windows script: {main_cmd}{RESET}")
+
+        auto_cmd = local_bin / "agy-auto.cmd"
+        with open(auto_cmd, "w", encoding="utf-8") as f:
+            f.write("@echo off\r\npython -m agy_multi.cli run %*\r\n")
+        print(f"{GREEN}✓ Installed Windows script: {auto_cmd}{RESET}")
+
+        for p in profiles:
+            p_id_cmd = local_bin / f"agy-{p['id']}.cmd"
+            with open(p_id_cmd, "w", encoding="utf-8") as f:
+                f.write(f"@echo off\r\npython -m agy_multi.cli run {p['id']} %*\r\n")
+
+            p_name_cmd = local_bin / f"agy-{p['name']}.cmd"
+            with open(p_name_cmd, "w", encoding="utf-8") as f:
+                f.write(f"@echo off\r\npython -m agy_multi.cli run {p['name']} %*\r\n")
+
     print(f"\n{BOLD}{CYAN}All shortcuts are available in your PATH!{RESET}")
-    print("You can run them in any terminal or herdr pane directly.")
+    print("You can run them in any terminal, Windows Terminal, or multiplexer pane directly.")
     return 0
 
 
-def cmd_serve(manager, args):
-    from .server import start_server
+def cmd_wt(manager: ProfileManager, args: argparse.Namespace) -> int:
+    """Launches or splits a session in Windows Terminal (wt.exe) or Orca client."""
+    profile_id = getattr(args, "identifier", None)
+    target_p = None
+    if profile_id:
+        target_p = manager.find_profile(profile_id)
+        if not target_p:
+            print(f"{RED}Error: Profile '{profile_id}' not found.{RESET}")
+            return 1
+    else:
+        target_p = manager.get_active_or_recent_profile()
+
+    is_tab = getattr(args, "tab", False) or (getattr(args, "command", "") in ("tab", "new-tab"))
+    split_dir = getattr(args, "split", "v")
+    project_arg = getattr(args, "project", None)
+    target_cwd = Path(project_arg).resolve() if project_arg else Path.cwd()
+
+    # Determine command to execute in new tab/pane
+    cmd_args = ["python", "-m", "agy_multi.cli", "run"]
+    if target_p:
+        cmd_args.append(target_p["name"])
+
+    title = f"agy: {target_p['name']} [P{target_p['id']}]" if target_p else "agy-multi"
+
+    mode_str = f"new tab [{target_cwd.name}]" if is_tab else f"{'vertical' if split_dir == 'v' else 'horizontal'} split pane"
+
+    if is_orca_terminal():
+        success = launch_orca_terminal(
+            command_args=cmd_args,
+            split=split_dir,
+            new_tab=is_tab,
+            title=title,
+            cwd=target_cwd
+        )
+        if success:
+            print(f"{GREEN}✓ Successfully launched {title} in Orca ({mode_str}).{RESET}")
+            if project_arg:
+                print(f"  Project: {target_cwd}")
+            return 0
+
+    success = launch_windows_terminal(
+        command_args=cmd_args,
+        split=split_dir,
+        new_tab=is_tab,
+        title=title,
+        cwd=target_cwd
+    )
+
+    if success:
+        print(f"{GREEN}✓ Successfully launched {title} in Windows Terminal ({mode_str}).{RESET}")
+        if project_arg:
+            print(f"  Project: {target_cwd}")
+        return 0
+    else:
+        print(f"{RED}Failed to launch split pane or tab. Make sure Orca or 'wt.exe' is available.{RESET}")
+        return 1
+
+
+def cmd_serve(manager: ProfileManager, args: argparse.Namespace) -> int:
+    pid_file = manager.base_dir / "dashboard_server.pid"
+    log_file = manager.base_dir / "dashboard_server.log"
+
+    # 1. Stop background server
+    if getattr(args, "stop", False):
+        if pid_file.is_file():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                if is_process_alive(pid):
+                    interrupt_process(pid)
+                    time.sleep(0.3)
+                pid_file.unlink(missing_ok=True)
+                print(f"{GREEN}✓ Dashboard server (PID: {pid}) stopped successfully.{RESET}")
+                return 0
+            except Exception as e:
+                print(f"{RED}Error stopping dashboard server: {e}{RESET}")
+                return 1
+        else:
+            print(f"{YELLOW}No background dashboard server found running (PID file missing).{RESET}")
+            return 0
+
+    # 2. Check status of background server
+    if getattr(args, "status", False):
+        if pid_file.is_file():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                if is_process_alive(pid):
+                    host = "0.0.0.0" if getattr(args, "lan", False) else (getattr(args, "host", None) or "127.0.0.1")
+                    port = getattr(args, "port", 8989)
+                    print(f"{GREEN}● Dashboard server is RUNNING{RESET} (PID: {BOLD}{pid}{RESET})")
+                    print(f"  URL: {CYAN}http://{host}:{port}{RESET}")
+                    print(f"  Log: {log_file}")
+                    return 0
+                else:
+                    pid_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+        print(f"{YELLOW}○ Dashboard server is NOT running.{RESET}")
+        return 0
+
     host = "0.0.0.0" if getattr(args, "lan", False) else args.host
-    start_server(port=args.port, host=host, token=getattr(args, "token", None))
+    port = args.port
+
+    # 3. Daemonize / Background launch
+    if getattr(args, "daemon", False):
+        if pid_file.is_file():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                if is_process_alive(pid):
+                    print(f"{GREEN}● Dashboard server is ALREADY running in background{RESET} (PID: {BOLD}{pid}{RESET})")
+                    print(f"  URL: {CYAN}http://{host}:{port}{RESET}")
+                    return 0
+            except Exception:
+                pass
+
+        # Prepare child command
+        cmd = [
+            sys.executable,
+            "-m",
+            "agy_multi.cli",
+            "serve",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        if getattr(args, "lan", False):
+            cmd.append("--lan")
+        if getattr(args, "token", None):
+            cmd.extend(["--token", args.token])
+
+        extra_kwargs = {}
+        if sys.platform == "win32":
+            CREATE_NO_WINDOW = 0x08000000
+            DETACHED_PROCESS = 0x00000008
+            extra_kwargs["creationflags"] = CREATE_NO_WINDOW | DETACHED_PROCESS
+        else:
+            extra_kwargs["start_new_session"] = True
+
+        log_f = open(log_file, "a", encoding="utf-8")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_f,
+            stderr=log_f,
+            stdin=subprocess.DEVNULL,
+            close_fds=True,
+            **extra_kwargs
+        )
+
+        pid_file.write_text(str(proc.pid), encoding="utf-8")
+        time.sleep(0.3)
+
+        if proc.poll() is None and is_process_alive(proc.pid):
+            print(f"\n{GREEN}{BOLD}✓ Usage Dashboard server started in background!{RESET}")
+            print(f"  • PID    : {BOLD}{proc.pid}{RESET}")
+            print(f"  • URL    : {CYAN}{BOLD}http://{host}:{port}{RESET}")
+            print(f"  • Log    : {log_file}")
+            print(f"  • Status : {CYAN}agy-multi server --status{RESET}")
+            print(f"  • Stop   : {CYAN}agy-multi server --stop{RESET}\n")
+            return 0
+        else:
+            print(f"{RED}Failed to start dashboard server in background. Check log: {log_file}{RESET}")
+            return 1
+
+    # 4. Foreground execution (default)
+    from .server import start_server
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    try:
+        start_server(port=port, host=host, token=getattr(args, "token", None))
+    finally:
+        pid_file.unlink(missing_ok=True)
     return 0
 
 
@@ -1069,6 +1353,15 @@ def cmd_init(manager, args):
 
 
 def main():
+    if sys.platform == "win32":
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            if hasattr(sys.stderr, "reconfigure"):
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     load_env_config()
     parser = argparse.ArgumentParser(
         prog="agy-multi",
@@ -1095,9 +1388,9 @@ def main():
     p_login = subparsers.add_parser("login", aliases=["auth"], help="Trigger Google OAuth authentication for a profile")
     p_login.add_argument("identifier", help="Profile ID, name, or email")
 
-    # use / switch / pane-title
-    p_use = subparsers.add_parser("use", aliases=["switch", "pane-title"], help="Set the current terminal pane & tab title to represent a specific profile")
-    p_use.add_argument("identifier", help="Profile ID, name, or email")
+    # use / switch / pane-title / title
+    p_use = subparsers.add_parser("use", aliases=["switch", "pane-title", "title"], help="Set the current terminal pane & tab title to represent a specific profile")
+    p_use.add_argument("identifier", nargs="?", default=None, help="Profile ID, name, or email (optional: defaults to active profile)")
 
     # add
     p_add = subparsers.add_parser("add", help="Add a new profile")
@@ -1148,14 +1441,17 @@ def main():
     # install
     subparsers.add_parser("install", help="Install global commands and agy-N shortcuts")
 
-    # usage / stats / dashboard
-    p_usage = subparsers.add_parser("usage", aliases=["stats", "dashboard"], help="Show usage statistics and generate HTML dashboard")
+    # usage / stats / dashboard / dash
+    p_usage = subparsers.add_parser("usage", aliases=["stats", "dashboard", "dash"], help="Show usage statistics and generate HTML dashboard")
     p_usage.add_argument("--html", nargs="?", const="", help="Specify path to output HTML dashboard")
     p_usage.add_argument("--json", action="store_true", help="Output raw JSON data")
     p_usage.add_argument("--csv", action="store_true", help="Output raw CSV data")
 
-    # serve
-    p_serve = subparsers.add_parser("serve", help="Run real-time usage dashboard web server")
+    # serve / server / web / dash-server
+    p_serve = subparsers.add_parser("serve", aliases=["server", "web", "dash-server"], help="Run real-time usage dashboard web server")
+    p_serve.add_argument("-d", "--daemon", action="store_true", help="Run dashboard server in the background as a daemon")
+    p_serve.add_argument("--stop", action="store_true", help="Stop running background dashboard server")
+    p_serve.add_argument("--status", action="store_true", help="Check status of background dashboard server")
     p_serve.add_argument("--port", type=int, default=8989, help="Server port (default: 8989)")
     p_serve.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
     p_serve.add_argument("--lan", action="store_true", help="Bind to 0.0.0.0 for LAN access (generates or requires --token)")
@@ -1180,6 +1476,23 @@ def main():
     # creds / auth-helper
     p_creds = subparsers.add_parser("creds", help="Inspect or auto-discover OAuth client credentials for 24/7 background token refresh")
     p_creds.add_argument("--save", action="store_true", help="Automatically discover credentials from local agy binary and append to ~/.bashrc")
+
+    # tab / new-tab
+    p_tab = subparsers.add_parser("tab", aliases=["new-tab"], help="Launch session in a new terminal tab in Orca or Windows Terminal")
+    p_tab.add_argument("identifier", nargs="?", default=None, help="Profile ID, name, or email (optional)")
+    p_tab.add_argument("--project", "-p", default=None, help="Target project / worktree directory (default: current directory)")
+
+    # split / wt
+    p_wt = subparsers.add_parser("split", aliases=["wt"], help="Launch session in a split pane (or new tab) inside Orca or Windows Terminal")
+    p_wt.add_argument("identifier", nargs="?", default=None, help="Profile ID, name, or email (optional)")
+    p_wt.add_argument("--split", choices=["v", "h"], default="v", help="Split orientation (v: vertical, h: horizontal, default: v)")
+    p_wt.add_argument("--tab", action="store_true", help="Open as new tab instead of split pane")
+    p_wt.add_argument("--project", "-p", default=None, help="Target project / worktree directory (default: current directory)")
+
+    # refresh
+    p_refresh = subparsers.add_parser("refresh", help="Proactively refresh OAuth access tokens for profiles")
+    p_refresh.add_argument("identifier", nargs="?", default=None, help="Profile ID or name (optional: all profiles if omitted)")
+    p_refresh.add_argument("-f", "--force", action="store_true", help="Force refresh even if token has not expired")
 
     # Parse known args so trailing args can be forwarded to agy in `run` and `relay`
     if len(sys.argv) > 1 and sys.argv[1] == "run":
@@ -1218,9 +1531,9 @@ def main():
         sys.exit(cmd_status(manager, args))
     elif args.command in ("init", "setup"):
         sys.exit(cmd_init(manager, args))
-    elif args.command in ("usage", "stats", "dashboard"):
+    elif args.command in ("usage", "stats", "dashboard", "dash"):
         sys.exit(cmd_usage(manager, args))
-    elif args.command == "serve":
+    elif args.command in ("serve", "server", "web", "dash-server"):
         sys.exit(cmd_serve(manager, args))
     elif args.command == "config":
         sys.exit(cmd_config(manager, args))
@@ -1240,8 +1553,12 @@ def main():
         sys.exit(cmd_edit(manager, args))
     elif args.command == "creds":
         sys.exit(cmd_creds(manager, args))
+    elif args.command in ("wt", "split", "tab", "new-tab"):
+        sys.exit(cmd_wt(manager, args))
     elif args.command == "install":
         sys.exit(cmd_install_helpers(manager, args))
+    elif args.command == "refresh":
+        sys.exit(cmd_refresh(manager, args))
     else:
         parser.print_help()
         sys.exit(1)

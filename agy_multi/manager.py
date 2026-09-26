@@ -7,12 +7,11 @@ import os
 import sys
 import json
 import time
-import fcntl
 import signal
 import shutil
 import sqlite3
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -20,10 +19,18 @@ from .utils import (
     sync_profile_environment,
     inherit_profile_config,
     inspect_token_file,
+    evaluate_token_expiry,
     get_profile_active_pids,
     detect_real_home,
     find_process_running_conversation,
     set_terminal_pane_title,
+    file_lock,
+    is_process_alive,
+    interrupt_process,
+    build_profile_env,
+    find_orca_binary,
+    find_agy_binary,
+    restore_terminal,
     BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
 )
 
@@ -45,6 +52,10 @@ class ProfileManager:
     @staticmethod
     def _detect_real_home() -> Path:
         return detect_real_home()
+
+    def _ensure_profile_links(self, profile_dir: Path) -> None:
+        """Ensures profile environment links and configs are synchronized (NTFS junction & symlink safe)."""
+        sync_profile_environment(profile_dir, self.real_home)
 
 
     def _ensure_initialized(self) -> None:
@@ -185,7 +196,7 @@ class ProfileManager:
 
         # Initialize profile directory & symlinks
         pdir = self.get_profile_dir(name)
-        sync_profile_environment(pdir, self.real_home)
+        self._ensure_profile_links(pdir)
 
         # Handle configuration inheritance if requested
         if inherit_from:
@@ -426,35 +437,120 @@ class ProfileManager:
             pass
         return True
 
+    def refresh_profile_token(self, identifier: str, force: bool = False) -> Dict[str, Any]:
+        """Refreshes the OAuth access token for a profile if expired or expiring soon (< 5m)."""
+        p = self.find_profile(identifier)
+        if not p:
+            return {"refreshed": False, "success": False, "error": f"Profile '{identifier}' not found"}
+
+        token_file = self.get_token_path(p["name"])
+        if not token_file.is_file():
+            return {"refreshed": False, "success": False, "error": "Token file not found"}
+
+        try:
+            with open(token_file, "r", encoding="utf-8") as f:
+                auth_data = json.load(f)
+        except Exception as e:
+            return {"refreshed": False, "success": False, "error": str(e)}
+
+        token_obj = auth_data.get("token", {})
+        refresh_tok = token_obj.get("refresh_token")
+        if not refresh_tok:
+            return {"refreshed": False, "success": False, "error": "No refresh_token found"}
+
+        if not force:
+            expiry = token_obj.get("expiry")
+            exp_info = evaluate_token_expiry(expiry, has_refresh_token=True)
+            rem_secs = exp_info.get("expires_in_seconds")
+            # If token is still valid for > 5 minutes, no need to refresh
+            if rem_secs is not None and rem_secs > 300:
+                return {"refreshed": False, "success": True, "email": auth_data.get("email")}
+
+        import urllib.request
+        import urllib.parse
+        from .usage import get_oauth_client_credentials
+        client_id, client_secret = get_oauth_client_credentials()
+        if not client_id or not client_secret:
+            from .cli import extract_credentials_from_binary
+            _, bin_cid, bin_sec = extract_credentials_from_binary()
+            if bin_cid and bin_sec:
+                client_id, client_secret = bin_cid, bin_sec
+                os.environ["AGY_OAUTH_CLIENT_ID"] = bin_cid
+                os.environ["AGY_OAUTH_CLIENT_SECRET"] = bin_sec
+
+        if not client_id or not client_secret:
+            return {"refreshed": False, "success": False, "error": "Missing OAuth client credentials"}
+
+        post_data = urllib.parse.urlencode({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_tok,
+            "grant_type": "refresh_token",
+        }).encode("utf-8")
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=post_data)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                new_info = json.loads(resp.read().decode("utf-8"))
+                new_access_token = new_info.get("access_token")
+                if new_access_token:
+                    token_obj["access_token"] = new_access_token
+                    if "expires_in" in new_info:
+                        token_obj["expiry"] = datetime.fromtimestamp(
+                            time.time() + new_info["expires_in"], tz=timezone.utc
+                        ).isoformat()
+                    auth_data["token"] = token_obj
+                    with open(token_file, "w", encoding="utf-8") as f:
+                        json.dump(auth_data, f, indent=2)
+                    try:
+                        token_file.chmod(0o600)
+                    except OSError:
+                        pass
+                    return {"refreshed": True, "success": True, "email": auth_data.get("email")}
+        except urllib.error.HTTPError as e:
+            err_body = ""
+            try:
+                err_body = e.read().decode("utf-8")
+            except Exception:
+                pass
+            return {"refreshed": False, "success": False, "error": f"HTTP {e.code}: {err_body}"}
+        except Exception as e:
+            return {"refreshed": False, "success": False, "error": str(e)}
+
+        return {"refreshed": False, "success": False, "error": "Unknown refresh failure"}
+
     def run_profile(self, identifier: str, agy_args: List[str], exec_replace: bool = True) -> int:
         """Runs agy with the given profile's isolated environment."""
         p = self.find_profile(identifier)
         if not p:
             raise ValueError(f"Profile '{identifier}' not found. Use `agy-multi list` to view profiles.")
 
+        # Proactively refresh token if expired or expiring soon (< 5m)
+        try:
+            self.refresh_profile_token(p["name"])
+        except Exception:
+            pass
+
         pdir = self.get_profile_dir(p["name"])
         # Fast sync symlinks in case new tools/configs were added to real_home
-        sync_profile_environment(pdir, self.real_home)
+        self._ensure_profile_links(pdir)
 
-        env = os.environ.copy()
-        env["HOME"] = str(pdir)
-        env["AGY_REAL_HOME"] = str(self.real_home)
-        env["AGY_PROFILE_NAME"] = p["name"]
-        env["AGY_PROFILE_ID"] = p["id"]
-        env["AGY_PROFILE_EMAIL"] = p["email"]
+        env = build_profile_env(p, pdir, self.real_home)
 
-        agy_binary = shutil.which("agy") or str(self.real_home / ".local" / "bin" / "agy")
+        agy_binary = find_agy_binary(self.real_home)
         cmd = [agy_binary] + agy_args
 
-        if exec_replace:
-            # Replaces the current process (standard for interactive TUI)
+        if exec_replace and hasattr(os, "execvpe"):
+            # Replaces the current process (standard for interactive TUI on Unix)
             sys.stdout.flush()
             sys.stderr.flush()
             os.execvpe(agy_binary, cmd, env)
             return 0
         else:
-            proc = subprocess.run(cmd, env=env)
-            return proc.returncode
+            try:
+                proc = subprocess.run(cmd, env=env)
+                return proc.returncode
+            finally:
+                restore_terminal()
 
     def login_profile(self, identifier: str) -> bool:
         """Starts agy in interactive login mode for the specified profile."""
@@ -463,12 +559,18 @@ class ProfileManager:
             raise ValueError(f"Profile '{identifier}' not found.")
 
         pdir = self.get_profile_dir(p["name"])
-        sync_profile_environment(pdir, self.real_home)
+        self._ensure_profile_links(pdir)
 
         set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}] (authenticating)")
 
         token_file = self.get_token_path(p["name"])
-        if token_file.exists():
+        candidate_tokens = [
+            token_file,
+            token_file.parent / "jetski-standalone-oauth-token",
+            token_file.parent.parent / "jetski-standalone-oauth-token",
+        ]
+        has_existing = any(f.is_file() for f in candidate_tokens)
+        if has_existing:
             auth = inspect_token_file(token_file)
             print(f"{YELLOW}Warning: Profile '{p['name']}' already has credentials (Email: {auth.get('email')}).{RESET}")
             ans = input(f"Do you want to re-authenticate with {p['email']}? [y/N]: ").strip().lower()
@@ -476,23 +578,31 @@ class ProfileManager:
                 print("Login cancelled.")
                 set_terminal_pane_title(f"agy: {p['name']} [P{p['id']}]")
                 return False
-            # Remove existing token to force OAuth prompt
-            token_file.unlink()
+            # Remove all candidate token files to force fresh OAuth prompt
+            for f in candidate_tokens:
+                if f.is_file():
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
 
         print(f"\n{CYAN}{BOLD}=== Initiating Google OAuth Login for [{p['name']}] ==={RESET}")
         print(f"Target Account Email: {BOLD}{p['email']}{RESET}\n")
-        print("A Google authorization link will be displayed below.")
-        print("Please log in with the corresponding Google AI Pro account in your browser.\n")
+        print("Launching interactive Antigravity CLI session to complete authentication.")
+        print("Please follow the on-screen prompts to log in with your Google account.")
+        print(f"(Once authenticated, exit the session by typing {CYAN}/exit{RESET} or pressing {CYAN}Ctrl+D{RESET})\n")
 
-        env = os.environ.copy()
-        env["HOME"] = str(pdir)
-        agy_binary = shutil.which("agy") or str(self.real_home / ".local" / "bin" / "agy")
+        env = build_profile_env(p, pdir, self.real_home)
+        agy_binary = find_agy_binary(self.real_home)
 
-        # Launch agy in interactive turn to trigger authentication
-        cmd = [agy_binary, "-p", "ping"]
-        subprocess.run(cmd, env=env)
+        # Launch agy in interactive mode (NOT print mode with -p)
+        cmd = [agy_binary]
+        try:
+            subprocess.run(cmd, env=env)
+        finally:
+            restore_terminal()
 
-        # Post-check token
+        # Post-check token across all candidate locations
         auth_after = inspect_token_file(token_file)
         if auth_after["is_valid"]:
             logged_email = auth_after.get("email")
@@ -751,67 +861,63 @@ class ProfileManager:
 
         # Acquire lock to prevent parallel relays from racing
         lock_file = self.base_dir / "relay.lock"
-        with open(lock_file, "w") as lock_f:
-            fcntl.flock(lock_f, fcntl.LOCK_EX)
+        with file_lock(lock_file):
+            # 3. Copy conversation database safely using SQLite Backup API with fallback
             try:
-                # 3. Copy conversation database safely using SQLite Backup API with fallback
+                src_conn = sqlite3.connect(f"file:{src_convo_db.resolve()}?mode=ro", uri=True, timeout=10.0)
+                dst_conn = sqlite3.connect(dst_convo_db, timeout=10.0)
+                src_conn.backup(dst_conn)
+                src_conn.close()
+                dst_conn.close()
+            except Exception:
+                shutil.copy2(src_convo_db, dst_convo_db)
+
+            # 4. Sync conversation_summaries.db metadata
+            src_summaries_db = src_cli / "conversation_summaries.db"
+            dst_summaries_db = dst_cli / "conversation_summaries.db"
+            if src_summaries_db.is_file():
                 try:
-                    src_conn = sqlite3.connect(f"file:{src_convo_db.resolve()}?mode=ro", uri=True, timeout=10.0)
-                    dst_conn = sqlite3.connect(dst_convo_db, timeout=10.0)
-                    src_conn.backup(dst_conn)
+                    src_conn = sqlite3.connect(f"file:{src_summaries_db.resolve()}?mode=ro", uri=True, timeout=5.0)
+                    src_conn.row_factory = sqlite3.Row
+                    src_cur = src_conn.cursor()
+                    src_cur.execute("SELECT * FROM conversation_summaries WHERE conversation_id = ?;", (conversation_id,))
+                    row = src_cur.fetchone()
                     src_conn.close()
-                    dst_conn.close()
+
+                    if row:
+                        row_dict = dict(row)
+                        if row_dict.get("title"):
+                            convo_title = row_dict["title"]
+
+                        dst_conn = sqlite3.connect(dst_summaries_db, timeout=10.0)
+                        dst_cur = dst_conn.cursor()
+                        dst_cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_summaries';")
+                        if not dst_cur.fetchone():
+                            # Create schema from source
+                            src_conn2 = sqlite3.connect(f"file:{src_summaries_db.resolve()}?mode=ro", uri=True, timeout=5.0)
+                            cur2 = src_conn2.cursor()
+                            cur2.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='conversation_summaries';")
+                            create_sql = cur2.fetchone()[0]
+                            src_conn2.close()
+                            dst_cur.execute(create_sql)
+
+                        cols = list(row_dict.keys())
+                        placeholders = ", ".join(["?"] * len(cols))
+                        col_names = ", ".join([f"`{c}`" for c in cols])
+                        values = [row_dict[c] for c in cols]
+                        dst_cur.execute(f"INSERT OR REPLACE INTO conversation_summaries ({col_names}) VALUES ({placeholders});", values)
+                        dst_conn.commit()
+                        dst_conn.close()
                 except Exception:
-                    shutil.copy2(src_convo_db, dst_convo_db)
+                    pass
 
-                # 4. Sync conversation_summaries.db metadata
-                src_summaries_db = src_cli / "conversation_summaries.db"
-                dst_summaries_db = dst_cli / "conversation_summaries.db"
-                if src_summaries_db.is_file():
-                    try:
-                        src_conn = sqlite3.connect(f"file:{src_summaries_db.resolve()}?mode=ro", uri=True, timeout=5.0)
-                        src_conn.row_factory = sqlite3.Row
-                        src_cur = src_conn.cursor()
-                        src_cur.execute("SELECT * FROM conversation_summaries WHERE conversation_id = ?;", (conversation_id,))
-                        row = src_cur.fetchone()
-                        src_conn.close()
-
-                        if row:
-                            row_dict = dict(row)
-                            if row_dict.get("title"):
-                                convo_title = row_dict["title"]
-
-                            dst_conn = sqlite3.connect(dst_summaries_db, timeout=10.0)
-                            dst_cur = dst_conn.cursor()
-                            dst_cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversation_summaries';")
-                            if not dst_cur.fetchone():
-                                # Create schema from source
-                                src_conn2 = sqlite3.connect(f"file:{src_summaries_db.resolve()}?mode=ro", uri=True, timeout=5.0)
-                                cur2 = src_conn2.cursor()
-                                cur2.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='conversation_summaries';")
-                                create_sql = cur2.fetchone()[0]
-                                src_conn2.close()
-                                dst_cur.execute(create_sql)
-
-                            cols = list(row_dict.keys())
-                            placeholders = ", ".join(["?"] * len(cols))
-                            col_names = ", ".join([f"`{c}`" for c in cols])
-                            values = [row_dict[c] for c in cols]
-                            dst_cur.execute(f"INSERT OR REPLACE INTO conversation_summaries ({col_names}) VALUES ({placeholders});", values)
-                            dst_conn.commit()
-                            dst_conn.close()
-                    except Exception:
-                        pass
-
-                # 5. Sync brain/<cid> artifacts and scratch files
-                if sync_brain:
-                    src_brain = src_cli / "brain" / conversation_id
-                    dst_brain = dst_cli / "brain" / conversation_id
-                    if src_brain.is_dir():
-                        dst_brain.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copytree(src_brain, dst_brain, dirs_exist_ok=True)
-            finally:
-                fcntl.flock(lock_f, fcntl.LOCK_UN)
+            # 5. Sync brain/<cid> artifacts and scratch files
+            if sync_brain:
+                src_brain = src_cli / "brain" / conversation_id
+                dst_brain = dst_cli / "brain" / conversation_id
+                if src_brain.is_dir():
+                    dst_brain.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(src_brain, dst_brain, dirs_exist_ok=True)
 
         # Record relay event in registry directory for supervisor coordination
         try:
@@ -909,67 +1015,59 @@ class ProfileManager:
         """Registers a running SessionRunner supervisor session."""
         sup_file = self._get_supervisors_file()
         lock_file = self.base_dir / "supervisors.lock"
-        with open(lock_file, "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
-            try:
-                data = {}
-                if sup_file.is_file():
-                    try:
-                        data = json.loads(sup_file.read_text(encoding="utf-8"))
-                    except Exception:
-                        data = {}
+        with file_lock(lock_file):
+            data = {}
+            if sup_file.is_file():
+                try:
+                    data = json.loads(sup_file.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
 
-                # Prune stale PIDs
-                active_data = {}
-                for spid_str, info in data.items():
-                    try:
-                        spid = int(spid_str)
-                        os.kill(spid, 0)
+            # Prune stale PIDs safely without killing on Windows
+            active_data = {}
+            for spid_str, info in data.items():
+                try:
+                    spid = int(spid_str)
+                    if is_process_alive(spid):
                         active_data[spid_str] = info
-                    except (OSError, ValueError):
-                        pass
+                except (OSError, ValueError):
+                    pass
 
-                active_data[str(pid)] = {
-                    "pid": pid,
-                    "profile_name": profile_name,
-                    "profile_id": profile_id,
-                    "conversation_id": conversation_id or "",
-                    "started_at": time.time(),
-                    "pane_info": pane_info or {}
-                }
+            active_data[str(pid)] = {
+                "pid": pid,
+                "profile_name": profile_name,
+                "profile_id": profile_id,
+                "conversation_id": conversation_id or "",
+                "started_at": time.time(),
+                "pane_info": pane_info or {}
+            }
 
-                tmp_file = sup_file.with_suffix(".tmp")
-                tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
-                tmp_file.replace(sup_file)
-            finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+            tmp_file = sup_file.with_suffix(".tmp")
+            tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp_file.replace(sup_file)
 
     def unregister_active_supervisor(self, pid: int) -> None:
         """Removes a SessionRunner supervisor session upon termination."""
         sup_file = self._get_supervisors_file()
         lock_file = self.base_dir / "supervisors.lock"
-        with open(lock_file, "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
-            try:
-                if sup_file.is_file():
-                    try:
-                        data = json.loads(sup_file.read_text(encoding="utf-8"))
-                        if str(pid) in data:
-                            del data[str(pid)]
-                            tmp_file = sup_file.with_suffix(".tmp")
-                            tmp_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-                            tmp_file.replace(sup_file)
-                    except Exception:
-                        pass
-                # Also clean any leftover relay command file for this pid
-                cmd_file = self.base_dir / f"relay_cmd_{pid}.json"
-                if cmd_file.is_file():
-                    try:
-                        cmd_file.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-            finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+        with file_lock(lock_file):
+            if sup_file.is_file():
+                try:
+                    data = json.loads(sup_file.read_text(encoding="utf-8"))
+                    if str(pid) in data:
+                        del data[str(pid)]
+                        tmp_file = sup_file.with_suffix(".tmp")
+                        tmp_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                        tmp_file.replace(sup_file)
+                except Exception:
+                    pass
+            # Also clean any leftover relay command file for this pid
+            cmd_file = self.base_dir / f"relay_cmd_{pid}.json"
+            if cmd_file.is_file():
+                try:
+                    cmd_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def find_active_supervisor(
         self,
@@ -982,24 +1080,22 @@ class ProfileManager:
             return None
 
         lock_file = self.base_dir / "supervisors.lock"
-        with open(lock_file, "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
+        with file_lock(lock_file):
             try:
+                data = json.loads(sup_file.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+
+            target_p = self.find_profile(profile_identifier) if profile_identifier else None
+            target_p_name = target_p["name"] if target_p else (str(profile_identifier) if profile_identifier else None)
+
+            active_data = {}
+            matched_supervisor = None
+
+            for spid_str, info in data.items():
                 try:
-                    data = json.loads(sup_file.read_text(encoding="utf-8"))
-                except Exception:
-                    return None
-
-                target_p = self.find_profile(profile_identifier) if profile_identifier else None
-                target_p_name = target_p["name"] if target_p else (str(profile_identifier) if profile_identifier else None)
-
-                active_data = {}
-                matched_supervisor = None
-
-                for spid_str, info in data.items():
-                    try:
-                        spid = int(spid_str)
-                        os.kill(spid, 0)
+                    spid = int(spid_str)
+                    if is_process_alive(spid):
                         active_data[spid_str] = info
 
                         # 1. Match by conversation_id if provided
@@ -1009,21 +1105,19 @@ class ProfileManager:
                         elif not matched_supervisor and target_p_name:
                             if info.get("profile_name") == target_p_name or str(info.get("profile_id")) == str(profile_identifier):
                                 matched_supervisor = info
-                    except (OSError, ValueError):
-                        pass
+                except (OSError, ValueError):
+                    pass
 
-                # If pruning removed any entries, save cleaned active_data
-                if len(active_data) != len(data):
-                    try:
-                        tmp_file = sup_file.with_suffix(".tmp")
-                        tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
-                        tmp_file.replace(sup_file)
-                    except Exception:
-                        pass
+            # If pruning removed any entries, save cleaned active_data
+            if len(active_data) != len(data):
+                try:
+                    tmp_file = sup_file.with_suffix(".tmp")
+                    tmp_file.write_text(json.dumps(active_data, indent=2, ensure_ascii=False), encoding="utf-8")
+                    tmp_file.replace(sup_file)
+                except Exception:
+                    pass
 
-                return matched_supervisor
-            finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+            return matched_supervisor
 
     def dispatch_relay_to_supervisor(
         self,
@@ -1031,10 +1125,8 @@ class ProfileManager:
         target_profile: str,
         conversation_id: str
     ) -> bool:
-        """Dispatches an in-place relay command to an active SessionRunner supervisor via SIGUSR1."""
-        try:
-            os.kill(target_pid, 0)
-        except OSError:
+        """Dispatches an in-place relay command to an active SessionRunner supervisor via Sentinel file / SIGUSR1."""
+        if not is_process_alive(target_pid):
             return False
 
         cmd_file = self.base_dir / f"relay_cmd_{target_pid}.json"
@@ -1048,7 +1140,11 @@ class ProfileManager:
             tmp_cmd.write_text(json.dumps(cmd_data, ensure_ascii=False), encoding="utf-8")
             tmp_cmd.replace(cmd_file)
 
-            os.kill(target_pid, signal.SIGUSR1)
+            if hasattr(signal, "SIGUSR1"):
+                try:
+                    os.kill(target_pid, signal.SIGUSR1)
+                except Exception:
+                    pass
             return True
         except Exception:
             try:
@@ -1148,16 +1244,25 @@ class ProfileManager:
         pane_title = f"agy: {target_name} [P{target_id}] • {conversation_id[:8]}"
         candidate_paths = self.get_conversation_workspace_paths(conversation_id)
 
-        # 1. Scan for any running OS process associated with this conversation
+        # 1. Scan for any running OS process or active supervisor associated with this conversation
         running_proc = find_process_running_conversation(conversation_id)
         running_herdr_pane = None
         running_tmux_pane = None
+        running_orca_handle = None
+
+        active_sup = self.find_active_supervisor(conversation_id=conversation_id)
+        if active_sup and active_sup.get("pane_info"):
+            running_herdr_pane = active_sup["pane_info"].get("herdr_pane_id")
+            running_tmux_pane = active_sup["pane_info"].get("tmux_pane")
+            running_orca_handle = active_sup["pane_info"].get("orca_terminal_handle")
+
         if running_proc:
             pid = running_proc.get("pid")
             if pid:
                 env_vars = self._read_proc_environ(pid)
-                running_herdr_pane = env_vars.get("HERDR_PANE_ID")
-                running_tmux_pane = env_vars.get("TMUX_PANE")
+                running_herdr_pane = running_herdr_pane or env_vars.get("HERDR_PANE_ID")
+                running_tmux_pane = running_tmux_pane or env_vars.get("TMUX_PANE")
+                running_orca_handle = running_orca_handle or env_vars.get("ORCA_TERMINAL_HANDLE")
 
         # 2. Check Herdr
         if shutil.which("herdr"):
@@ -1166,6 +1271,8 @@ class ProfileManager:
                     ["herdr", "pane", "list"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=3
                 )
                 if res.returncode == 0 and res.stdout.strip():
@@ -1211,10 +1318,7 @@ class ProfileManager:
 
                         # Gracefully terminate old running process if any to unlock SQLite WAL
                         if running_proc and running_proc.get("pid"):
-                            try:
-                                os.kill(running_proc["pid"], signal.SIGINT)
-                            except OSError:
-                                pass
+                            interrupt_process(running_proc["pid"])
 
                         # Send C-c to clear prompt
                         subprocess.run(["herdr", "pane", "send-keys", target_pane_id, "C-c"], capture_output=True, timeout=3)
@@ -1244,6 +1348,8 @@ class ProfileManager:
                     ["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_current_path}\t#{pane_title}\t#{pane_active}"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=3
                 )
                 if res.returncode == 0 and res.stdout.strip():
@@ -1275,10 +1381,7 @@ class ProfileManager:
                         target_pane_id = scored_panes[0][1]
 
                         if running_proc and running_proc.get("pid"):
-                            try:
-                                os.kill(running_proc["pid"], signal.SIGINT)
-                            except OSError:
-                                pass
+                            interrupt_process(running_proc["pid"])
 
                         subprocess.run(["tmux", "send-keys", "-t", target_pane_id, "C-c"], capture_output=True, timeout=3)
                         time.sleep(0.3)
@@ -1288,6 +1391,71 @@ class ProfileManager:
                         return {
                             "multiplexer": "tmux",
                             "pane_id": target_pane_id,
+                            "command": cmd_str,
+                            "title": pane_title
+                        }
+            except Exception:
+                pass
+
+        # 4. Check Orca client
+        orca_bin = find_orca_binary()
+        if orca_bin:
+            try:
+                extra_kwargs = {}
+                if sys.platform == "win32":
+                    extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                res = subprocess.run(
+                    [orca_bin, "terminal", "list", "--json"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=3,
+                    **extra_kwargs
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout)
+                    terminals = data.get("result", {}).get("terminals", [])
+                    scored_terms = []
+                    curr_handle = os.environ.get("ORCA_TERMINAL_HANDLE")
+                    for t in terminals:
+                        thandle = t.get("handle")
+                        if not thandle or not t.get("connected"):
+                            continue
+                        score = 0
+                        if running_orca_handle and thandle == running_orca_handle:
+                            score += 1000
+                        elif curr_handle and thandle == curr_handle:
+                            score += 800
+                        ttitle = str(t.get("title") or "")
+                        if conversation_id[:8] in ttitle:
+                            score += 200
+                        if from_name and from_name in ttitle:
+                            score += 100
+                        if from_id and f"[P{from_id}]" in ttitle:
+                            score += 100
+                        tpath = t.get("worktreePath")
+                        if tpath and any(str(tpath).lower() == str(cp).lower() for cp in candidate_paths):
+                            score += 50
+                        
+                        if score >= 50:
+                            scored_terms.append((score, thandle))
+
+                    if scored_terms:
+                        scored_terms.sort(key=lambda x: x[0], reverse=True)
+                        target_handle = scored_terms[0][1]
+
+                        if running_proc and running_proc.get("pid"):
+                            interrupt_process(running_proc["pid"])
+
+                        subprocess.run([orca_bin, "terminal", "send", "--terminal", target_handle, "--interrupt"], capture_output=True, timeout=3, **extra_kwargs)
+                        time.sleep(0.3)
+                        subprocess.run([orca_bin, "terminal", "send", "--terminal", target_handle, "--text", cmd_str, "--enter"], capture_output=True, timeout=3, **extra_kwargs)
+                        subprocess.run([orca_bin, "terminal", "rename", "--terminal", target_handle, "--title", pane_title], capture_output=True, timeout=3, **extra_kwargs)
+
+                        return {
+                            "multiplexer": "orca",
+                            "pane_id": target_handle,
                             "command": cmd_str,
                             "title": pane_title
                         }

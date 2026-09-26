@@ -103,6 +103,14 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         return bool(self.auth_token) or bool(self.allow_remote)
 
     def _send_unauthorized(self):
+        # Drain any unread request body so the socket closes cleanly without TCP RST on Windows (WinError 10053)
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > 0:
+                self.rfile.read(content_length)
+        except Exception:
+            pass
+
         err_bytes = json.dumps(
             {"success": False, "error": "Unauthorized: Valid API token required"},
             ensure_ascii=False,
@@ -113,6 +121,10 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(err_bytes)))
         self.end_headers()
         self.wfile.write(err_bytes)
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
 
     def do_HEAD(self):
         self.do_GET()

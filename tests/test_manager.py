@@ -3,6 +3,7 @@ Unit tests for agy_multi manager and utils.
 """
 
 import os
+import sys
 import json
 import tempfile
 import pytest
@@ -196,9 +197,10 @@ def test_sensitive_directories_excluded_from_symlink(tmp_path):
     from agy_multi.utils import sync_profile_environment
     sync_profile_environment(pdir, mock_home)
 
-    # .gitconfig should be symlinked
+    # .gitconfig should be symlinked or linked
     assert (pdir / ".gitconfig").exists()
-    assert (pdir / ".gitconfig").is_symlink()
+    if sys.platform != "win32":
+        assert (pdir / ".gitconfig").is_symlink()
 
     # Sensitive credential dirs must NOT be symlinked
     assert not (pdir / ".ssh").exists()
@@ -213,20 +215,17 @@ def test_registry_and_profile_permissions(tmp_path):
     base_dir = tmp_path / "profiles"
 
     mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
-    # Check directory permissions (0700)
-    base_mode = stat.S_IMODE(base_dir.stat().st_mode)
-    assert base_mode == 0o700
+    # Check directory permissions (0700 on Unix)
+    if sys.platform != "win32":
+        base_mode = stat.S_IMODE(base_dir.stat().st_mode)
+        assert base_mode == 0o700
 
-    # Check accounts.json permissions (0600)
+    # Check accounts.json permissions (0600 on Unix)
     reg_file = base_dir / "accounts.json"
     assert reg_file.is_file()
-    reg_mode = stat.S_IMODE(reg_file.stat().st_mode)
-    assert reg_mode == 0o600
-
-
-
-
-
+    if sys.platform != "win32":
+        reg_mode = stat.S_IMODE(reg_file.stat().st_mode)
+        assert reg_mode == 0o600
 
 
 def test_import_existing_token_permissions(tmp_path):
@@ -253,8 +252,9 @@ def test_import_existing_token_permissions(tmp_path):
 
     target = mgr.get_token_path("coder")
     assert target.is_file()
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
-    assert stat.S_IMODE(mgr.get_profile_dir("coder").stat().st_mode) == 0o700
+    if sys.platform != "win32":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert stat.S_IMODE(mgr.get_profile_dir("coder").stat().st_mode) == 0o700
 
 
 def test_evaluate_token_expiry_states():
@@ -411,10 +411,11 @@ def test_inherit_profile_config_and_security_boundary(tmp_path):
     assert (tgt_cfg / "skills" / "demo_skill" / "SKILL.md").is_file()
     # Verify plugin copied
     assert (tgt_cfg / "plugins" / "demo_plugin" / "plugin.json").is_file()
-    # Verify MCP config copied with 0o600
+    # Verify MCP config copied with 0o600 on Unix
     tgt_mcp = tgt_cfg / "mcp_config.json"
     assert tgt_mcp.is_file()
-    assert stat.S_IMODE(tgt_mcp.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(tgt_mcp.stat().st_mode) == 0o600
 
     # Verify settings sanitized (sensitive token stripped)
     tgt_settings = tgt_cli / "settings.json"
@@ -564,4 +565,86 @@ def test_dispatch_relay_to_multiplexer_tmux(tmp_path, monkeypatch):
     assert ["tmux", "send-keys", "-t", "%1", "C-c"] in commands_run
     assert ["tmux", "send-keys", "-t", "%1", f"agy-multi run 2 --conversation {cid}", "Enter"] in commands_run
     assert ["tmux", "select-pane", "-t", "%1", "-T", f"agy: dst_acc [P2] • {cid[:8]}"] in commands_run
+
+
+def test_login_profile_interactive(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    p = mgr.add_profile("testlogin", "login@example.com", custom_id="1")
+    pdir = mgr.get_profile_dir("testlogin")
+
+    mock_agy = str(tmp_path / "fake_agy")
+    monkeypatch.setattr(shutil, "which", lambda cmd: mock_agy if "agy" in cmd else None)
+    monkeypatch.setattr("agy_multi.manager.set_terminal_pane_title", lambda t: None)
+
+    executed_cmd = []
+    executed_env = {}
+
+    def mock_subprocess_run(cmd, env=None, *args, **kwargs):
+        if cmd and cmd[0] == mock_agy:
+            executed_cmd.extend(cmd)
+            if env:
+                executed_env.update(env)
+            token_path = mgr.get_token_path("testlogin")
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            jwt = "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ImxvZ2luQGV4YW1wbGUuY29tIiwiZXhwIjoyNTI0NjA4MDAwfQ."
+            token_path.write_text(json.dumps({"token": {"id_token": jwt}}), encoding="utf-8")
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+
+    success = mgr.login_profile("1")
+    assert success is True
+    assert executed_cmd == [mock_agy]
+    assert "-p" not in executed_cmd
+    assert executed_env["AGY_PROFILE_NAME"] == "testlogin"
+    assert executed_env["HOME"] == str(pdir.resolve())
+    if sys.platform == "win32":
+        assert executed_env["USERPROFILE"] == str(pdir.resolve())
+        assert executed_env["SSH_CONNECTION"] == "127.0.0.1 0 127.0.0.1 0"
+        assert executed_env["SSH_CLIENT"] == "127.0.0.1 0 0"
+
+
+def test_login_profile_existing_credentials(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=tmp_path)
+    mgr.add_profile("testreauth", "reauth@example.com", custom_id="2")
+
+    token_path = mgr.get_token_path("testreauth")
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    jwt = "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InJlYXV0aEBleGFtcGxlLmNvbSIsImV4cCI6MjUyNDYwODAwMH0."
+    token_path.write_text(json.dumps({"token": {"id_token": jwt}}), encoding="utf-8")
+
+    mock_agy = str(tmp_path / "fake_agy")
+    monkeypatch.setattr(shutil, "which", lambda cmd: mock_agy if "agy" in cmd else None)
+    monkeypatch.setattr("agy_multi.manager.set_terminal_pane_title", lambda t: None)
+
+    # 1. Decline re-auth
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    agy_called = []
+    def mock_subprocess_run_decline(cmd, *a, **kw):
+        if cmd and cmd[0] == mock_agy:
+            agy_called.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run_decline)
+    assert mgr.login_profile("2") is False
+    assert len(agy_called) == 0
+    assert token_path.is_file()
+
+    # 2. Accept re-auth
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    def mock_subprocess_run(cmd, env=None, *args, **kwargs):
+        if cmd and cmd[0] == mock_agy:
+            assert not token_path.is_file()
+            token_path.write_text(json.dumps({"token": {"id_token": jwt}}), encoding="utf-8")
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_subprocess_run)
+    assert mgr.login_profile("2") is True
+
 
