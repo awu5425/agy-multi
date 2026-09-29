@@ -10,6 +10,7 @@ import base64
 import time
 import shutil
 import subprocess
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
@@ -47,24 +48,37 @@ SENSITIVE_CONFIG_KEYS = {
 
 
 def secure_write_bytes(file_path: Union[str, Path], content: bytes, mode: int = 0o600) -> None:
-    """Safely writes binary data ensuring strict permissions (default 0o600) without race conditions."""
-    p = Path(file_path)
+    """Safely and atomically writes binary data ensuring strict permissions (default 0o600).
+    Writes to a temporary file in the same directory and replaces the target file via os.replace."""
+    p = Path(file_path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
-    if sys.platform != "win32":
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        fd = os.open(str(p), flags, mode)
-        try:
-            os.fchmod(fd, mode)
-        except OSError:
-            pass
-        with open(fd, "wb") as f:
-            f.write(content)
-    else:
-        p.write_bytes(content)
-        try:
-            p.chmod(mode)
-        except OSError:
-            pass
+    tmp_path = p.parent / f".tmp_{p.name}_{secrets.token_hex(4)}"
+    try:
+        if sys.platform != "win32":
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            fd = os.open(str(tmp_path), flags, mode)
+            try:
+                os.fchmod(fd, mode)
+            except OSError:
+                pass
+            with open(fd, "wb") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(fd)
+        else:
+            tmp_path.write_bytes(content)
+            try:
+                tmp_path.chmod(mode)
+            except OSError:
+                pass
+        os.replace(str(tmp_path), str(p))
+    except Exception:
+        if tmp_path.is_file():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def secure_write_text(file_path: Union[str, Path], content: str, mode: int = 0o600) -> None:

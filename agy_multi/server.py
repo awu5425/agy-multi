@@ -236,13 +236,23 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         # If token was supplied via query string, set cookie for subsequent fetch calls
         set_cookie_header = None
         has_query_token = False
+        remaining_query = ""
         if self.auth_token:
             try:
-                parsed = urllib.parse.urlparse(self.path)
-                q_token = urllib.parse.parse_qs(parsed.query).get("token", [None])[0]
-                if q_token and secrets.compare_digest(q_token, self.auth_token):
-                    set_cookie_header = f"agy_token={q_token}; Path=/; SameSite=Lax; HttpOnly"
+                parsed = urllib.parse.urlsplit(self.path)
+                params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                token_val = None
+                kept_params = []
+                for k, v in params:
+                    if k == "token":
+                        token_val = v
+                    else:
+                        kept_params.append((k, v))
+                if token_val and secrets.compare_digest(token_val, self.auth_token):
+                    set_cookie_header = f"agy_token={token_val}; Path=/; SameSite=Lax; HttpOnly"
                     has_query_token = True
+                    if kept_params:
+                        remaining_query = "?" + urllib.parse.urlencode(kept_params)
             except Exception:
                 pass
 
@@ -250,7 +260,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         if clean_path in ("/", "/index.html", "/dashboard"):
             if has_query_token and set_cookie_header:
                 self.send_response(302)
-                self.send_header("Location", clean_path)
+                self.send_header("Location", clean_path + remaining_query)
                 self.send_header("Set-Cookie", set_cookie_header)
                 self.end_headers()
                 return
@@ -514,15 +524,26 @@ def start_server(
         print(f"\n[INFO] Non-loopback binding ({host}) with NO_AUTH enabled (Tailscale / Trusted Network mode).")
     elif not env_token and not is_loopback:
         env_token = secrets.token_hex(16)
+        token_file = mgr.base_dir / "server_token"
+        try:
+            from .utils import secure_write_text
+            secure_write_text(token_file, env_token, mode=0o600)
+            token_saved_msg = f" (saved to {token_file})"
+        except Exception:
+            token_saved_msg = ""
+        masked_token = env_token[:4] + "****"
         print(f"\n[SECURITY] Non-loopback binding ({host}). Generated admin token for ALL endpoints (GET/POST/HTML):")
-        print(f"  Token: {env_token}")
-        print(f"  Use Header: 'Authorization: Bearer {env_token}' or 'X-API-Token: {env_token}' or '?token={env_token}' in browser URL\n")
+        print(f"  Token: {masked_token}{token_saved_msg}")
+        print("  Use Header: 'Authorization: Bearer <token>' or 'X-API-Token: <token>' or '?token=<token>' in browser URL\n")
     elif not is_loopback:
+        masked_token = env_token[:4] + "****" if len(env_token) >= 4 else "****"
         print(f"\n[SECURITY WARNING] Binding to non-loopback host '{host}'.")
+        print(f"  Token: {masked_token}")
         print("  All endpoints require the configured API token.")
         print("  Ensure network firewall / VPC controls access to this port.\n")
     elif env_token:
-        print("\n[SECURITY] Server token configured: GET /api/* and HTML dashboard require authentication.\n")
+        masked_token = env_token[:4] + "****" if len(env_token) >= 4 else "****"
+        print(f"\n[SECURITY] Server token configured ({masked_token}): GET /api/* and HTML dashboard require authentication.\n")
 
     UsageDashboardHandler.auth_token = env_token
 

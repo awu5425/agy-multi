@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-09-29
+
+### Security & Reliability (安全加固与鲁棒性增强)
+- **原子化安全写入与断电防损坏 (`secure_write`)**：
+  - 重构 `secure_write_bytes` 与 `secure_write_text`，不再直接清空已有文件（`O_TRUNC`），而是先在同级目录下安全写入独立临时文件（`.tmp_<filename>_<token>`，严格 `0o600` 权限），完成数据写入、`flush()` 与底层 `os.fsync()` 后，通过 `os.replace` 原子替换目标文件；
+  - 若在写入阶段进程异常中断或断电，保留旧文件原样无损，并自动清理残余临时文件，杜绝 `accounts.json` 与 OAuth 凭据文件损坏。
+- **302 重定向保留非 Token 查询参数**：
+  - 访问看板页面（`/`、`/index.html`、`/dashboard`）时若携带 `?token=...`，在提取并剥离敏感 token 的同时，完整保留其他 URL 查询参数（如 `?lang=zh&theme=dark`），修复重定向后语言或视图参数丢失问题。
+- **非本机地址启动 Token 脱敏打印与持久化保全**：
+  - 当以非本机地址（如 `0.0.0.0`）启动看板服务时，控制台及 daemon 模式日志文件脱敏输出 Token（仅保留前 4 位，如 `abcd****`），阻断守护进程日志（`dashboard.log`）明文泄漏；
+  - 自动生成的管理员 Token 安全持久化至 `~/.gemini-profiles/server_token`（严格 `0o600` 权限），兼顾安全与可运维性。
+- **全量测试套件扩充至 102 项**：增加原子写入回滚、非 Token 参数保留重定向与启动日志 Token 脱敏的自动化回归测试。
+
 ## [1.5.2] - 2026-09-29
 
 ### Security & Hardening (安全加固与外审缺陷修复)

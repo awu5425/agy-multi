@@ -121,6 +121,7 @@ def test_cookie_httponly_and_redirect_strip_query_token():
         def end_headers(self):
             pass
 
+    # 1. Plain query token is stripped
     h = DummyHandler("/dashboard?token=secret123", "secret123")
     H.do_GET(h)
     assert 302 in h.responses
@@ -129,8 +130,23 @@ def test_cookie_httponly_and_redirect_strip_query_token():
     assert "HttpOnly" in headers["Set-Cookie"]
     assert "agy_token=secret123" in headers["Set-Cookie"]
 
+    # 2. Non-token query parameters are preserved
+    h2 = DummyHandler("/dashboard?token=secret123&lang=zh&theme=dark", "secret123")
+    H.do_GET(h2)
+    assert 302 in h2.responses
+    headers2 = dict(h2.header_list)
+    assert headers2["Location"] == "/dashboard?lang=zh&theme=dark"
+    assert "agy_token=secret123" in headers2["Set-Cookie"]
 
-def test_secure_write_helpers(tmp_path):
+    # 3. Root path with extra query parameters
+    h3 = DummyHandler("/?token=secret123&lang=zh", "secret123")
+    H.do_GET(h3)
+    assert 302 in h3.responses
+    headers3 = dict(h3.header_list)
+    assert headers3["Location"] == "/?lang=zh"
+
+
+def test_secure_write_helpers_and_atomic_rollback(tmp_path, monkeypatch):
     import sys
     import json
     from agy_multi.utils import secure_write_text, secure_write_json, secure_write_bytes
@@ -151,6 +167,58 @@ def test_secure_write_helpers(tmp_path):
         assert (f_txt.stat().st_mode & 0o777) == 0o600
         assert (f_json.stat().st_mode & 0o777) == 0o600
         assert (f_bin.stat().st_mode & 0o777) == 0o600
+
+    # Test atomic rollback on failure: existing target file must stay intact
+    target = tmp_path / "important.json"
+    secure_write_text(target, "original content")
+
+    def fail_replace(src, dst):
+        raise OSError("Disk failure simulation")
+
+    monkeypatch.setattr("os.replace", fail_replace)
+    with pytest.raises(OSError, match="Disk failure"):
+        secure_write_text(target, "corrupted content")
+
+    assert target.read_text(encoding="utf-8") == "original content"
+    tmp_files = list(tmp_path.glob(".tmp_*"))
+    assert len(tmp_files) == 0
+
+
+def test_server_token_masking_on_non_loopback(tmp_path, monkeypatch, capsys):
+    from agy_multi.server import start_server
+
+    class MockServer:
+        def __init__(self, addr, handler):
+            self.addr = addr
+            self.handler = handler
+
+        def serve_forever(self):
+            raise KeyboardInterrupt()
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr("agy_multi.server.ThreadingHTTPServer", MockServer)
+    monkeypatch.setattr("agy_multi.server.ProfileManager", lambda: ProfileManager(base_dir=tmp_path / "profiles", real_home=tmp_path))
+
+    # 1. Non-loopback auto-generated token: masked in stdout and saved to server_token
+    start_server(host="0.0.0.0", port=8989, token=None)
+    captured = capsys.readouterr().out
+    assert "Token: " in captured
+    assert "****" in captured
+    server_token_file = tmp_path / "profiles" / "server_token"
+    assert server_token_file.is_file()
+    real_token = server_token_file.read_text(encoding="utf-8").strip()
+    assert len(real_token) == 32
+    # Ensure full token was never printed in stdout
+    assert real_token not in captured
+    assert f"Token: {real_token[:4]}****" in captured
+
+    # 2. Non-loopback explicit token: masked in stdout
+    start_server(host="0.0.0.0", port=8989, token="my_very_secret_token_123")
+    captured2 = capsys.readouterr().out
+    assert "my_very_secret_token_123" not in captured2
+    assert "Token: my_v****" in captured2
 
 
 def test_read_json_body_malformed_and_size_limit():
