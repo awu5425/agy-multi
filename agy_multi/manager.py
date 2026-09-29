@@ -3,6 +3,7 @@ agy_multi.manager
 ProfileManager handles lifecycle, authentication status, and execution of isolated agy profiles.
 """
 
+import re
 import os
 import sys
 import json
@@ -11,6 +12,7 @@ import signal
 import shutil
 import sqlite3
 import subprocess
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -31,8 +33,12 @@ from .utils import (
     find_orca_binary,
     find_agy_binary,
     restore_terminal,
-    BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
+    secure_write_json,
+    secure_write_bytes,
+    BOLD, GREEN, YELLOW, RED, CYAN, RESET
 )
+
+logger = logging.getLogger("agy_multi.manager")
 
 
 class ProfileManager:
@@ -75,12 +81,7 @@ class ProfileManager:
             return {"profiles": []}
 
     def _save_registry(self, data: Dict[str, Any]) -> None:
-        with open(self.registry_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        try:
-            self.registry_file.chmod(0o600)
-        except OSError:
-            pass
+        secure_write_json(self.registry_file, data, mode=0o600)
 
     def get_config(self) -> Dict[str, Any]:
         registry = self._load_registry()
@@ -430,11 +431,7 @@ class ProfileManager:
                     d.chmod(0o700)
         except OSError:
             pass
-        shutil.copy2(host_token_file, target_token_file)
-        try:
-            target_token_file.chmod(0o600)
-        except OSError:
-            pass
+        secure_write_bytes(target_token_file, host_token_file.read_bytes(), mode=0o600)
         return True
 
     def refresh_profile_token(self, identifier: str, force: bool = False) -> Dict[str, Any]:
@@ -499,12 +496,7 @@ class ProfileManager:
                             time.time() + new_info["expires_in"], tz=timezone.utc
                         ).isoformat()
                     auth_data["token"] = token_obj
-                    with open(token_file, "w", encoding="utf-8") as f:
-                        json.dump(auth_data, f, indent=2)
-                    try:
-                        token_file.chmod(0o600)
-                    except OSError:
-                        pass
+                    secure_write_json(token_file, auth_data, mode=0o600)
                     return {"refreshed": True, "success": True, "email": auth_data.get("email")}
         except urllib.error.HTTPError as e:
             err_body = ""
@@ -850,6 +842,8 @@ class ProfileManager:
         else:
             convo_title = f"Conversation {conversation_id[:8]}"
 
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", str(conversation_id)):
+            raise ValueError("Invalid conversation_id.")
         src_convo_db = src_cli / "conversations" / f"{conversation_id}.db"
         if not src_convo_db.is_file():
             raise FileNotFoundError(f"Conversation database not found: {src_convo_db}")
@@ -869,7 +863,8 @@ class ProfileManager:
                 src_conn.backup(dst_conn)
                 src_conn.close()
                 dst_conn.close()
-            except Exception:
+            except Exception as e:
+                logger.debug("SQLite online backup failed, falling back to copy2: %s", e)
                 shutil.copy2(src_convo_db, dst_convo_db)
 
             # 4. Sync conversation_summaries.db metadata
@@ -928,10 +923,9 @@ class ProfileManager:
                 "timestamp": time.time(),
             }
             relay_file = self.base_dir / "last_relay.json"
-            with open(relay_file, "w", encoding="utf-8") as rf:
-                json.dump(relay_record, rf, ensure_ascii=False)
-        except Exception:
-            pass
+            secure_write_json(relay_file, relay_record)
+        except Exception as e:
+            logger.warning("Failed to save last_relay.json: %s", e)
 
         return {
             "success": True,
@@ -1233,6 +1227,8 @@ class ProfileManager:
         from_name = from_p["name"] if from_p else (str(from_identifier) if from_identifier else "")
         from_id = str(from_p["id"]) if from_p else ""
 
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", str(conversation_id or "")):
+            return {"success": False, "error": "Invalid conversation_id."}
         # Determine shortcut or multi command string
         if target_id and shutil.which(f"agy-{target_id}"):
             cmd_str = f"agy-{target_id} --conversation {conversation_id}"

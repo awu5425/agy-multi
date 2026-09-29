@@ -27,9 +27,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio ruff
           pip install -e .
 
+      - name: Lint with ruff
+        run: |
+          ruff check agy_multi tests/test_audit_fixes.py
+          ruff check --select F821,B023 tests
 
       - name: Run test suite
         run: |

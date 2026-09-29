@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-09-29
+
+### Security & Hardening (安全加固与外审缺陷修复)
+- **B1 (P0): 修复 `agy-multi init` 导入已有登录崩溃**：补齐 `inspect_token_file` 导入，彻底解决首次安装初始化向导（导入 `~/.gemini/antigravity-cli/antigravity-oauth-token`）时 `NameError` 崩溃缺陷。
+- **S1 (High): CORS 域名与 Tailscale 信任边界精准判定**：
+  - 弃用不安全的 `startswith("100.")` 和 `endswith(".ts.net")` 前缀/后缀模糊匹配，改用 `ipaddress` 库精确校验 Loopback 回环地址与 Tailscale CGNAT 私网网段（`100.64.0.0/10`）；
+  - MagicDNS 访问要求显式声明 `AGY_MULTI_TAILNET=<tailnet>.ts.net`，杜绝任意第三方 Funnel 或泛域名前缀跨域读取账号配额与邮箱。
+- **S2 (High): POST CSRF 与 DNS Rebinding 深度防御**：
+  - POST 接口强制校验 `Content-Type: application/json` 并验证 `Origin` 同源/可信白名单（允许 CLI/curl 等非浏览器工具）；
+  - 无 Token 模式下严格校验 `Host` 请求头必须为 IP 字面量或可信主机名，彻底阻断 DNS Rebinding 攻击。
+- **S3 (Med): Tailscale 与 LAN 认证边界收敛**：
+  - `NO_AUTH=1` 模式仅信任 Loopback 与 Tailscale CGNAT（100.64.0.0/10），杜绝普通局域网（LAN）未授权跨机写入。
+- **S4 (Med): 会话标识符白名单校验与命令注入防御**：
+  - 对 `conversation_id` 实施严格白名单正则校验（`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`），根除路径穿越与终端多路复用器（tmux / herdr）注入风险。
+- **S5 (Low): 请求体容量限制与类型安全**：
+  - 统一 `_read_json_body()` 实现，增加 1 MiB 最大读取上限与顶层 Object 类型强校验，防止恶意畸形 Payload 或拒绝服务。
+- **Token 泄漏面收敛与 Cookie 安全**：
+  - 看板 Cookie 启用 `HttpOnly; SameSite=Lax`，防止 XSS 攻击窃取 Token；
+  - 访问 HTML 看板页面时若带有 `?token=...`，鉴权成功后自动通过 302 重定向剥离 Query Token 并写入安全 Cookie，避免敏感 Token 驻留于浏览器历史记录与地址栏。
+- **文件权限竞态根治 (`secure_write`)**：
+  - 引入 `secure_write_text` / `secure_write_json` / `secure_write_bytes` 工具函数，在 Linux/Unix 环境下基于底层 `os.open` 直接指定 `0o600` / `0o700` 并执行 `os.fchmod`，彻底消除先写文件后 `chmod` 的可读权限竞争窗口。
+- **API 错误信息回显脱敏**：
+  - 400 与 500 响应信息均经过脱敏收敛，杜绝内部系统路径或敏感异常堆栈对外暴露。
+
+### Reliability & CI (质量工程与代码整洁)
+- **全量引入 Ruff 静态代码检查**：接入 GitHub Actions CI 流水线，针对 `F821`（未定义变量）、`F841`（未用变量）、`B023`（循环闭包未绑定）等实施全仓自动化防护。
+- **死代码与循环闭包修复**：清理 `cli.py`（闭包变量延迟绑定）、`runner.py`、`usage.py`、`server.py`、`utils.py` 中的未用变量与冗余导入。
+- **测试套件扩充至 101 项**：新增针对本次外审缺陷的 28 项全量回归测试套件（`tests/test_audit_fixes.py`），CI 自动化测试 101/101 PASS (100%)。
+
 ## [1.5.1] - 2026-09-25
 
 ### Added

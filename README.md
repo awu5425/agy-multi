@@ -8,7 +8,7 @@ Concurrent multi-account isolation & real-time usage dashboard for Google Antigr
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](https://github.com/awu5425/agy-multi)
 [![Release](https://img.shields.io/github/v/release/awu5425/agy-multi?color=green)](https://github.com/awu5425/agy-multi/releases)
-[![Tests](https://img.shields.io/badge/tests-73%20passed-brightgreen.svg)](tests)
+[![Tests](https://img.shields.io/badge/tests-101%20passed-brightgreen.svg)](tests)
 [![GitHub stars](https://img.shields.io/github/stars/awu5425/agy-multi?style=social)](https://github.com/awu5425/agy-multi)
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -170,6 +170,8 @@ agy-multi config --min-buffer 5       # reserve buffer % (0–50); accounts at/b
 agy-multi config --on-no-target pause # pause (default: exact countdown, auto-wake) | burn_buffer (spend to 429)
 agy-multi creds [--save]              # inspect or auto-discover & save OAuth credentials for 24/7 background refresh
 agy-multi server [-d] [--status] [--stop] # dashboard server (supports background daemon on Linux & Windows)
+                                           # Note: Tailscale CGNAT (100.64.0.0/10) is auto-trusted.
+                                           # For MagicDNS (*.ts.net), set AGY_MULTI_TAILNET=your-tailnet.ts.net
 agy-multi usage | dash [--csv] [--html PATH] [--json] # CLI summary & HTML dashboard (alias dash)
 ```
 

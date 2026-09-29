@@ -8,7 +8,7 @@
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![Platform: Linux | Windows | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-green.svg)](https://github.com/awu5425/agy-multi)
 [![Release](https://img.shields.io/github/v/release/awu5425/agy-multi?color=green)](https://github.com/awu5425/agy-multi/releases)
-[![Tests](https://img.shields.io/badge/tests-73%20passed-brightgreen.svg)](tests)
+[![Tests](https://img.shields.io/badge/tests-101%20passed-brightgreen.svg)](tests)
 [![GitHub stars](https://img.shields.io/github/stars/awu5425/agy-multi?style=social)](https://github.com/awu5425/agy-multi)
 
 [English](README.md) | [简体中文](README_zh.md)
@@ -171,6 +171,8 @@ agy-multi config --min-buffer 5       # 设置保留缓冲配额 % (0–50)；�
 agy-multi config --on-no-target pause # 无可用账号策略：pause (默认：打印倒计时并自动唤醒) | burn_buffer (消耗缓冲至 429)
 agy-multi creds [--save]              # 检查或自动发现并保存 OAuth 客户端凭证（支持 7×24h 后台静默续期）
 agy-multi server [-d] [--status] [--stop] # 启动看板服务（支持 Linux 与 Windows 脱机后台常驻）
+                                           # 说明：Tailscale CGNAT (100.64.0.0/10) 自动信任；
+                                           # 如通过 MagicDNS (*.ts.net) 访问，请设置 AGY_MULTI_TAILNET=your-tailnet.ts.net
 agy-multi usage | dash [--csv] [--html PATH] [--json] # 终端用量概览与 HTML 看板（别名 dash）
 ```
 

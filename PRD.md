@@ -186,25 +186,29 @@ Google AI Pro 采用 5 小时滑动窗口（Rolling Window）限制配额。系�
 ## 6. 质量保证与测试体系
 
 ### 6.1 自动化测试矩阵 (`pytest`)
-测试在 `tests/test_creds.py`、`tests/test_manager.py`、`tests/test_runner.py`、`tests/test_server.py`、`tests/test_usage.py` 以及专门的 `tests/test_windows.py`。
-共计 **73 个自动化单元测试**，100% PASS，完整覆盖：
+测试在 `tests/test_creds.py`、`tests/test_manager.py`、`tests/test_runner.py`、`tests/test_server.py`、`tests/test_usage.py`、`tests/test_windows.py` 以及专门的 `tests/test_audit_fixes.py`。
+共计 **101 个自动化单元测试**，100% PASS，完整覆盖：
 - Profile 生命周期、配置克隆继承与安全边界；
 - 会话接力、SQLite 在线热备份与跨账号迁移；
 - 官方配额可用性判定与 5H/周额停用联动；
-- Web 看板鉴权、候选过滤与就地接力调度；
-- Windows 原生平台特性：NTFS 免特权目录联接、Win32 进程安全探活、`msvcrt` 排他文件并发锁、Sentinel 哨兵文件 IPC、Windows Terminal / Orca 命令行映射及终端退出模式自愈。
+- Web 看板鉴权、CORS 精确判定、CSRF 防护、候选过滤与就地接力调度；
+- Windows 原生平台特性：NTFS 免特权目录联接、Win32 进程安全探活、`msvcrt` 排他文件并发锁、Sentinel 哨兵文件 IPC、Windows Terminal / Orca 命令行映射及终端退出模式自愈；
+- 外审安全加固：B1/S1-S5 漏洞回归、安全原子文件权限写入（`secure_write`）、敏感 Token 自动脱敏重定向与 Cookie HttpOnly。
 
 ---
 
 ## 7. 已交付与后续规划
 
-**v1.5.1 已交付核心功能**：
+**v1.5.2 已交付核心功能**：
+- **安全加固与外审修复**：P0 初始化崩溃（B1）、CORS 精准 IP/Tailscale 鉴权（S1）、POST CSRF & DNS Rebinding 防护（S2）、LAN 权限收敛（S3）、会话白名单与命令防注入（S4）、请求体限制（S5）；
+- **Token 泄漏面收敛与权限竞态根除**：Cookie 启用 HttpOnly、Query Token 首次鉴权 302 自动脱敏重定向、`os.open(0o600)` 底层安全写入；
+- **全平台质量工程**：引入 Ruff 静态检查，修复闭包捕获与死代码，测试套件扩增至 101 项全量通过；
 - Linux & Windows 双平台原生运行支持与 100% 账号凭据沙箱隔离；
 - Orca 客户端与 Windows Terminal 分屏、标签管理与全生命周期自动标题同步；
 - 终端退出模式自愈（`restore_terminal`）与主动中断退出防劫持；
 - 双层平滑就地接力（Supervisor IPC + 终端复用器智能注入）与 Web 看板高科技流光动效；
 - 7×24h 启动与接力前主动 Token 自动刷新与后台守护常驻模式（`-d`）；
-- 全平台 73 项全量自动化测试套件与 GitHub Actions CI/CD 流水线。
+- 全平台 101 项全量自动化测试套件与 GitHub Actions CI/CD 流水线。
 
 **后续规划**：
 - 配额恢复后的系统原生桌面通知或可选 Webhook 广播；

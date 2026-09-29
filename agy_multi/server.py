@@ -7,19 +7,20 @@ import os
 import json
 import secrets
 import urllib.parse
+import ipaddress
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Optional
 
 try:
     from .manager import ProfileManager
-    from .usage import get_all_usage, get_profile_usage, render_html_dashboard, save_html_dashboard, profile_on_dashboard
+    from .usage import get_all_usage, get_profile_usage, render_html_dashboard, profile_on_dashboard
     from .utils import load_env_config
 except (ImportError, ValueError):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from agy_multi.manager import ProfileManager
-    from agy_multi.usage import get_all_usage, get_profile_usage, render_html_dashboard, save_html_dashboard, profile_on_dashboard
+    from agy_multi.usage import get_all_usage, get_profile_usage, render_html_dashboard, profile_on_dashboard
     from agy_multi.utils import load_env_config
 
 
@@ -27,6 +28,98 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
     manager = None
     auth_token: Optional[str] = None
     allow_remote: bool = False
+    MAX_BODY_BYTES = 1 << 20  # 1 MiB
+
+    @staticmethod
+    def _tailnet_suffix() -> Optional[str]:
+        s = os.environ.get("AGY_MULTI_TAILNET", "").strip().lower().lstrip(".")
+        return ("." + s) if s else None
+
+    @staticmethod
+    def _is_loopback_ip(ip: str) -> bool:
+        try:
+            a = ipaddress.ip_address(ip)
+            if getattr(a, "ipv4_mapped", None):
+                a = a.ipv4_mapped
+            return a.is_loopback
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _is_tailscale_ip(ip: str) -> bool:
+        try:
+            a = ipaddress.ip_address(ip)
+            if getattr(a, "ipv4_mapped", None):
+                a = a.ipv4_mapped
+            return a.version == 4 and a in ipaddress.ip_network("100.64.0.0/10")
+        except ValueError:
+            return False
+
+    @classmethod
+    def _is_trusted_hostname(cls, hostname: Optional[str]) -> bool:
+        """Hostnames trusted for Origin/Host: localhost, loopback IPs, Tailscale CGNAT IPs,
+        or the user's own tailnet suffix (AGY_MULTI_TAILNET=xxx.ts.net). Never a bare prefix match."""
+        if not hostname:
+            return False
+        h = hostname.strip("[]").lower()
+        if h == "localhost" or cls._is_loopback_ip(h) or cls._is_tailscale_ip(h):
+            return True
+        suffix = cls._tailnet_suffix()
+        return bool(suffix and h.endswith(suffix))
+
+    def _host_header_ok(self) -> bool:
+        """DNS-rebinding guard: without a token, Host must be an IP literal or a trusted name."""
+        if self.auth_token:
+            return True
+        host = self.headers.get("Host", "")
+        hostname = urllib.parse.urlsplit("//" + host).hostname if host else None
+        if not hostname:
+            return False
+        try:
+            ipaddress.ip_address(hostname)
+            return True
+        except ValueError:
+            return self._is_trusted_hostname(hostname)
+
+    def _post_csrf_ok(self) -> bool:
+        """CSRF guard: JSON content-type forces a CORS preflight; Origin (if sent) must be trusted or same-origin."""
+        ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return False
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True  # non-browser client (curl/CLI); browsers always send Origin on cross-site POST
+        try:
+            o = urllib.parse.urlsplit(origin)
+        except ValueError:
+            return False
+        if o.netloc and o.netloc == self.headers.get("Host", ""):
+            return True
+        return self._is_trusted_hostname(o.hostname)
+
+    def _read_json_body(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            raise ValueError("Invalid Content-Length")
+        if n < 0 or n > self.MAX_BODY_BYTES:
+            raise ValueError("Request body too large")
+        body = self.rfile.read(n) if n > 0 else b"{}"
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            raise ValueError("Malformed JSON body")
+        if not isinstance(payload, dict):
+            raise ValueError("JSON body must be an object")
+        return payload
+
+    def _send_forbidden(self, reason: str):
+        encoded = json.dumps({"success": False, "error": f"Forbidden: {reason}"}).encode("utf-8")
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
 
     def log_message(self, format, *args):
         # Suppress noisy standard request logs
@@ -38,9 +131,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
             return None
         try:
             parsed = urllib.parse.urlparse(origin)
-            if parsed.hostname in ("localhost", "127.0.0.1", "::1"):
-                return origin
-            if parsed.hostname and (parsed.hostname.startswith("100.") or parsed.hostname.endswith(".ts.net")):
+            if self._is_trusted_hostname(parsed.hostname):
                 return origin
         except Exception:
             pass
@@ -58,7 +149,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         # If no auth_token is configured, allow loopback, Tailscale, or trusted networks
         if not self.auth_token:
             client_ip = self.client_address[0]
-            if not self.allow_remote or client_ip in ("127.0.0.1", "::1", "localhost"):
+            if self._is_loopback_ip(client_ip):
                 return True
             # Allow Tailscale CGNAT range (100.64.0.0/10)
             if client_ip.startswith("100."):
@@ -135,23 +226,34 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if not self._host_header_ok():
+            self._send_forbidden("untrusted Host header")
+            return
         if self._requires_read_auth() and not self._check_auth():
             self._send_unauthorized()
             return
 
         # If token was supplied via query string, set cookie for subsequent fetch calls
         set_cookie_header = None
+        has_query_token = False
         if self.auth_token:
             try:
                 parsed = urllib.parse.urlparse(self.path)
                 q_token = urllib.parse.parse_qs(parsed.query).get("token", [None])[0]
                 if q_token and secrets.compare_digest(q_token, self.auth_token):
-                    set_cookie_header = f"agy_token={q_token}; Path=/; SameSite=Lax"
+                    set_cookie_header = f"agy_token={q_token}; Path=/; SameSite=Lax; HttpOnly"
+                    has_query_token = True
             except Exception:
                 pass
 
         clean_path = self.path.split("?", 1)[0]
         if clean_path in ("/", "/index.html", "/dashboard"):
+            if has_query_token and set_cookie_header:
+                self.send_response(302)
+                self.send_header("Location", clean_path)
+                self.send_header("Set-Cookie", set_cookie_header)
+                self.end_headers()
+                return
             try:
                 data = get_all_usage(self.manager)
                 html = render_html_dashboard(data)
@@ -166,8 +268,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
-            except Exception as e:
-                self.send_error(500, f"Error generating dashboard: {e}")
+            except Exception:
+                self.send_error(500, "Error generating dashboard")
 
         elif self.path.startswith("/api/usage"):
             try:
@@ -182,8 +284,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
-            except Exception as e:
-                self.send_error(500, f"Error fetching usage data: {e}")
+            except Exception:
+                self.send_error(500, "Error fetching usage data")
 
         elif self.path.startswith("/api/relay/candidates"):
             try:
@@ -222,8 +324,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
-            except Exception as e:
-                self.send_error(500, f"Error getting relay candidates: {e}")
+            except Exception:
+                self.send_error(500, "Error getting relay candidates")
 
         elif self.path == "/api/config":
             try:
@@ -235,21 +337,25 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
-            except Exception as e:
-                self.send_error(500, f"Error getting config: {e}")
+            except Exception:
+                self.send_error(500, "Error getting config")
         else:
             self.send_error(404, "Not Found")
 
     def do_POST(self):
+        if not self._host_header_ok():
+            self._send_forbidden("untrusted Host header")
+            return
+        if not self._post_csrf_ok():
+            self._send_forbidden("cross-site or non-JSON request")
+            return
         if not self._check_auth():
             self._send_unauthorized()
             return
 
         if self.path == "/api/relay":
             try:
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-                payload = json.loads(body.decode("utf-8"))
+                payload = self._read_json_body()
 
                 from_id = payload.get("from")
                 to_id = payload.get("to")
@@ -320,7 +426,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(encoded)
             except Exception as e:
-                err_bytes = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False).encode("utf-8")
+                err_msg = str(e) if isinstance(e, ValueError) else "Invalid relay request"
+                err_bytes = json.dumps({"success": False, "error": err_msg}, ensure_ascii=False).encode("utf-8")
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self._send_cors_headers()
@@ -330,9 +437,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/account-visibility":
             try:
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-                payload = json.loads(body.decode("utf-8"))
+                payload = self._read_json_body()
                 identifier = payload.get("name") or payload.get("id")
                 if identifier is None or "show_on_dashboard" not in payload:
                     raise ValueError("name and show_on_dashboard are required")
@@ -348,7 +453,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(encoded)
             except Exception as e:
-                err_bytes = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False).encode("utf-8")
+                err_msg = str(e) if isinstance(e, ValueError) else "Invalid visibility request"
+                err_bytes = json.dumps({"success": False, "error": err_msg}, ensure_ascii=False).encode("utf-8")
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self._send_cors_headers()
@@ -358,9 +464,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/config":
             try:
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-                payload = json.loads(body.decode("utf-8"))
+                payload = self._read_json_body()
                 new_cfg = self.manager.update_config(**payload)
                 encoded = json.dumps({"success": True, "config": new_cfg}, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
@@ -370,7 +474,8 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(encoded)
             except Exception as e:
-                err_bytes = json.dumps({"success": False, "error": str(e)}, ensure_ascii=False).encode("utf-8")
+                err_msg = str(e) if isinstance(e, ValueError) else "Invalid config request"
+                err_bytes = json.dumps({"success": False, "error": err_msg}, ensure_ascii=False).encode("utf-8")
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self._send_cors_headers()

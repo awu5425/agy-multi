@@ -10,7 +10,7 @@ import base64
 import time
 import shutil
 import subprocess
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
 from contextlib import contextmanager
@@ -44,6 +44,38 @@ SENSITIVE_CONFIG_KEYS = {
     "lastLoginUsername", "oauth_creds", "credentials", "token",
     "refreshToken", "accessToken", "id_token", "apiKey", "secret", "password"
 }
+
+
+def secure_write_bytes(file_path: Union[str, Path], content: bytes, mode: int = 0o600) -> None:
+    """Safely writes binary data ensuring strict permissions (default 0o600) without race conditions."""
+    p = Path(file_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(str(p), flags, mode)
+        try:
+            os.fchmod(fd, mode)
+        except OSError:
+            pass
+        with open(fd, "wb") as f:
+            f.write(content)
+    else:
+        p.write_bytes(content)
+        try:
+            p.chmod(mode)
+        except OSError:
+            pass
+
+
+def secure_write_text(file_path: Union[str, Path], content: str, mode: int = 0o600) -> None:
+    """Safely writes text to file ensuring strict permissions (default 0o600) without race conditions."""
+    secure_write_bytes(file_path, content.encode("utf-8"), mode=mode)
+
+
+def secure_write_json(file_path: Union[str, Path], data: Any, mode: int = 0o600, indent: int = 2) -> None:
+    """Safely writes json data to file ensuring strict permissions (default 0o600) without race conditions."""
+    content = json.dumps(data, indent=indent, ensure_ascii=False)
+    secure_write_text(file_path, content, mode=mode)
 
 
 @contextmanager

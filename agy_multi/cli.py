@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple
 
 from .manager import ProfileManager
 from .utils import (
-    BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET,
+    BOLD, GREEN, YELLOW, RED, CYAN, RESET,
     load_env_config, detect_real_home, set_terminal_pane_title,
     launch_windows_terminal, is_orca_terminal, launch_orca_terminal,
     is_process_alive, interrupt_process
@@ -204,7 +204,7 @@ def cmd_status(manager: ProfileManager, args: argparse.Namespace) -> int:
 
 
 def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
-    from .usage import get_all_usage, render_html_dashboard, save_html_dashboard, bucket_is_depleted
+    from .usage import get_all_usage, save_html_dashboard, bucket_is_depleted
 
     data = get_all_usage(manager)
 
@@ -299,8 +299,8 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
 
         is_g_wk_depleted = bucket_is_depleted(g_wk)
 
-        def fmt_rem(b, is_disabled_by_parent=False):
-            if not b or not oq.get("available"):
+        def fmt_rem(b, is_disabled_by_parent=False, quota_available=oq.get("available")):
+            if not b or not quota_available:
                 return "-"
             if b.get("disabled") or is_disabled_by_parent:
                 return f"{RED}Disabled{RESET}"
@@ -384,7 +384,7 @@ def cmd_config(manager: ProfileManager, args: argparse.Namespace) -> int:
         auto_str = f"{GREEN}Enabled (开启){RESET}" if cfg.get("auto_relay", True) else f"{YELLOW}Disabled (关闭 - 仅暂停不切换){RESET}"
         print(f"  {BOLD}Auto Takeover (自动接管):{RESET} {auto_str}")
         print(f"  {BOLD}No Relay Target Policy (无接力兜底策略):{RESET} {GREEN}{cfg.get('on_no_target', 'pause')}{RESET}")
-        print(f"\nTo update settings:")
+        print("\nTo update settings:")
         print(f"  {CYAN}agy-multi config --min-buffer 5{RESET}           (keep 5% reserve buffer)")
         print(f"  {CYAN}agy-multi config --auto-relay{RESET}             (enable auto takeover)")
         print(f"  {CYAN}agy-multi config --no-auto-relay{RESET}          (disable auto takeover, pause only)")
@@ -541,7 +541,7 @@ def cmd_relay(manager: ProfileManager, args: argparse.Namespace, remaining_args:
 
     no_exec = getattr(args, "no_exec", False)
     if no_exec:
-        print(f"Session data and artifacts synchronized. To continue this conversation:")
+        print("Session data and artifacts synchronized. To continue this conversation:")
         print(f"  {CYAN}{BOLD}agy-{dst_profile['id']} --conversation {cid}{RESET}")
         print(f"  or: {CYAN}agy-multi run {dst_profile['id']} --conversation {cid}{RESET}\n")
         return 0
@@ -729,8 +729,8 @@ def cmd_creds(manager: ProfileManager, args: argparse.Namespace) -> int:
                 f'AGY_OAUTH_CLIENT_ID="{active_cid}"\n'
                 f'AGY_OAUTH_CLIENT_SECRET="{active_sec}"\n'
             )
-            env_file.write_text(env_content, encoding="utf-8")
-            env_file.chmod(0o600)
+            from .utils import secure_write_text
+            secure_write_text(env_file, env_content, mode=0o600)
             print(f"{GREEN}✓ Saved credentials to {env_file} (mode 0600){RESET}")
         except Exception as e:
             print(f"{RED}Failed to write {env_file}: {e}{RESET}")
@@ -885,7 +885,7 @@ def cmd_add(manager: ProfileManager, args: argparse.Namespace) -> int:
             settings_mark = f"{GREEN}✓{RESET}" if report.get("settings_inherited") else f"{YELLOW}none{RESET}"
             hooks_mark = f"{GREEN}✓{RESET}" if report.get("hooks_inherited") else f"{YELLOW}none{RESET}"
             print(f"  Inherited: {CYAN}from '{inherit_from}'{RESET} (Skills: {skills_mark}, MCP: {mcp_mark}, Plugins: {plugins_mark}, Settings: {settings_mark}, Hooks: {hooks_mark})")
-        print(f"\nTo authenticate this profile, run:")
+        print("\nTo authenticate this profile, run:")
         print(f"  {CYAN}{BOLD}agy-multi login {new_p['id']}{RESET}\n")
         return 0
     except Exception as e:
@@ -919,7 +919,7 @@ def cmd_clone(manager: ProfileManager, args: argparse.Namespace) -> int:
         settings_mark = f"{GREEN}✓{RESET}" if report.get("settings_inherited") else f"{YELLOW}none{RESET}"
         hooks_mark = f"{GREEN}✓{RESET}" if report.get("hooks_inherited") else f"{YELLOW}none{RESET}"
         print(f"  Cloned Items: (Skills: {skills_mark}, MCP: {mcp_mark}, Plugins: {plugins_mark}, Settings: {settings_mark}, Hooks: {hooks_mark})")
-        print(f"\nTo authenticate this profile, run:")
+        print("\nTo authenticate this profile, run:")
         print(f"  {CYAN}{BOLD}agy-multi login {new_p['id']}{RESET}\n")
         return 0
     except Exception as e:
@@ -1274,11 +1274,12 @@ def cmd_init(manager, args):
     if not existing_profiles and default_token.is_file():
         print(f"{GREEN}✓ Detected existing Antigravity login at {default_agy_dir}{RESET}")
         try:
-            choice = input(f"Import existing login as Profile 1 ('main')? [Y/n]: ").strip().lower()
+            choice = input("Import existing login as Profile 1 ('main')? [Y/n]: ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             print("\nSetup cancelled.")
             return 1
         if choice in ("", "y", "yes"):
+            from .utils import inspect_token_file
             auth_info = inspect_token_file(default_token)
             email = auth_info.get("email") or "primary@developer"
             manager.add_profile(name="main", email=email, description="Default imported profile", custom_id="1")
@@ -1341,7 +1342,7 @@ def cmd_init(manager, args):
         print(f"  1. Run {BOLD}agy-multi list{RESET} to view all configured profiles.")
         unauthed = [p for p in profiles if not p.get("auth", {}).get("is_valid")]
         if unauthed:
-            print(f"  2. Authenticate newly added profiles:")
+            print("  2. Authenticate newly added profiles:")
             for p in unauthed:
                 print(f"     {CYAN}agy-multi login {p['id']}{RESET}  ({p['email']})")
         print(f"  3. Run {BOLD}agy-auto{RESET} (auto-picks best idle account) or {BOLD}agy-1{RESET}, {BOLD}agy-2{RESET}, etc. in any terminal or tmux/herdr pane.")

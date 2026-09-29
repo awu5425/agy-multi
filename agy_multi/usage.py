@@ -13,9 +13,9 @@ import urllib.parse
 import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
-from .utils import inspect_token_file, evaluate_token_expiry
+from .utils import inspect_token_file, secure_write_json
 
 
 def decode_varint(data: bytes, pos: int):
@@ -68,8 +68,8 @@ def parse_step_metadata(data: bytes) -> Dict[str, Any]:
                         if fn == 1:
                             res["timestamp"] = v
                     elif wt == 2:
-                        l, sub_pos = decode_varint(val, sub_pos)
-                        sub_pos += l
+                        length, sub_pos = decode_varint(val, sub_pos)
+                        sub_pos += length
             elif field_num == 9:  # Token usage container
                 sub_pos = 0
                 while sub_pos < len(val):
@@ -91,8 +91,8 @@ def parse_step_metadata(data: bytes) -> Dict[str, Any]:
                         elif fn == 10:
                             res["output_tokens"] = v
                     elif wt == 2:
-                        l, sub_pos = decode_varint(val, sub_pos)
-                        sub_pos += l
+                        length, sub_pos = decode_varint(val, sub_pos)
+                        sub_pos += length
         elif wire_type == 1:
             pos += 8
         elif wire_type == 5:
@@ -224,12 +224,7 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
                         ).isoformat()
                     auth_data["token"] = token_obj
                     try:
-                        with open(token_file, "w", encoding="utf-8") as f:
-                            json.dump(auth_data, f, indent=2)
-                        try:
-                            token_file.chmod(0o600)
-                        except OSError:
-                            pass
+                        secure_write_json(token_file, auth_data, mode=0o600)
                     except Exception:
                         pass
                     data = call_api(new_access_token)
@@ -617,7 +612,6 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
 
     g_5h = gemini_q.get("gemini-5h")
     g_wk = gemini_q.get("gemini-weekly")
-    c_5h = claude_q.get("3p-5h")
     c_wk = claude_q.get("3p-weekly")
 
     # Comprehensive Usability Assessment
@@ -632,14 +626,12 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
     g_5h_rem = g_5h.get("remainingPct", 100) if g_5h else 100.0
 
     auth_valid = bool(profile.get("auth", {}).get("is_valid", False))
-    p_name = profile.get("name", "")
 
     # Check token expiry directly via inspect_token_file
     token_file = pdir / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
     token_auth = inspect_token_file(token_file, now_ts=current_ts)
     token_exp_info = token_auth.get("expiry_info", {})
     token_is_expired = token_exp_info.get("is_expired", False)
-    token_expiring_soon = token_exp_info.get("state") == "expiring_soon"
 
     oq_reason = str(official_quota.get("reason", ""))
     oq_reason_lower = oq_reason.lower()

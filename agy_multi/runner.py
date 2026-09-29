@@ -11,23 +11,18 @@ import time
 import signal
 import threading
 import subprocess
-import shutil
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from .manager import ProfileManager
 from .usage import bucket_is_depleted, get_profile_usage
 from .utils import (
-    sync_profile_environment,
     find_process_running_conversation,
     set_terminal_pane_title,
     build_profile_env,
-    is_process_alive,
-    interrupt_process,
     restore_terminal,
     find_agy_binary,
-    BOLD, GREEN, YELLOW, RED, CYAN, MAGENTA, RESET
+    BOLD, GREEN, YELLOW, RED, CYAN, RESET
 )
 
 
@@ -541,7 +536,7 @@ class SessionRunner:
 
                     if cid:
                         try:
-                            res = self.manager.relay_conversation(
+                            self.manager.relay_conversation(
                                 curr_profile["name"],
                                 target_p["name"],
                                 cid,
