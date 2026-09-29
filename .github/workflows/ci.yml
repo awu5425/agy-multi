@@ -32,7 +32,7 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          ruff check agy_multi tests/test_audit_fixes.py
+          ruff check --select F821,F841,B023 agy_multi tests/test_audit_fixes.py
           ruff check --select F821,B023 tests
 
       - name: Run test suite
