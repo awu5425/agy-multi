@@ -83,23 +83,42 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
         return bool(suffix and h.endswith(suffix))
 
     @classmethod
+    def _local_hostname(cls) -> str:
+        try:
+            import socket
+            return socket.gethostname().strip().lower()
+        except Exception:
+            return ""
+
+    @classmethod
     def _is_trusted_host_header(cls, hostname: Optional[str]) -> bool:
         """Hostnames trusted for incoming Host header (DNS-rebinding guard):
-        All trusted hostnames, plus Cloudflare quick tunnels (*.trycloudflare.com).
-        Cloudflare owns trycloudflare.com DNS, which always resolves to Cloudflare Anycast IPs,
-        preventing any DNS-rebinding attacks to loopback/private IPs."""
+        All trusted hostnames, plus:
+        - Machine's local hostname (e.g. socket.gethostname())
+        - Tailscale MagicDNS (*.ts.net)
+        - Cloudflare quick tunnels (*.trycloudflare.com)
+        """
         if not hostname:
             return False
         h = hostname.strip("[]").lower()
         if cls._is_trusted_hostname(h):
+            return True
+        local_h = cls._local_hostname()
+        if local_h and h == local_h:
+            return True
+        if h.endswith(".ts.net") or h == "ts.net":
             return True
         if h.endswith(".trycloudflare.com") or h == "trycloudflare.com":
             return True
         return False
 
     def _host_header_ok(self) -> bool:
-        """DNS-rebinding guard: without a token, Host must be an IP literal or a trusted name."""
+        """DNS-rebinding guard: without a token, Host must be an IP literal, trusted name,
+        or the connection originates directly from Tailscale CGNAT."""
         if self.auth_token:
+            return True
+        client_ip = self.client_address[0] if getattr(self, "client_address", None) else ""
+        if client_ip and self._is_tailscale_ip(client_ip):
             return True
         host = self.headers.get("Host", "")
         hostname = urllib.parse.urlsplit("//" + host).hostname if host else None

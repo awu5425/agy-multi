@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] - 2026-10-01
+
+### Fixed & Security (Tailscale 隧道与本地主机名放行)
+- **修复 Tailscale 隧道与 MagicDNS 域名访问报 403 错误**：
+  - 修复 DNS Rebinding 防护机制未放行 Tailscale MagicDNS 域名（`*.ts.net`）及本机主机名（`vm-0-4-ubuntu`），导致从 Tailscale 客户端或局域网访问时报 `Forbidden: untrusted Host header` 的缺陷；
+  - `_is_trusted_host_header` 原生支持 `*.ts.net` 与机器本机短主机名（`socket.gethostname()`）；
+  - `_host_header_ok` 自动信任直接经由 Tailscale WireGuard CGNAT 隧道（`100.64.0.0/10`）进来的内网客户端连接；
+- **全量测试套件扩充至 109 项**：新增 Tailscale MagicDNS 域名、短主机名及 Tailscale 客户端直连放行的自动化回归测试。
+
 ## [1.5.4] - 2026-09-30
 
 ### Fixed & Security (隧道访问与安全主机头放行)

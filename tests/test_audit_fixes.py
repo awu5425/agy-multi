@@ -51,10 +51,20 @@ def test_post_csrf_allows_same_origin_and_cli():
 @pytest.mark.parametrize("host,ok", [
     ("127.0.0.1:8989", True), ("localhost:8989", True), ("192.168.1.5:8989", True),
     ("campaigns-xyz.trycloudflare.com", True), ("trycloudflare.com", True),
+    ("vm-0-4-ubuntu.taila5af92.ts.net:8989", True), ("node.ts.net", True),
     ("rebind.attacker.com:8989", False), ("", False),
 ])
 def test_host_header_guard_without_token(host, ok):
     assert _handler({"Host": host})._host_header_ok() is ok
+
+
+def test_host_header_local_hostname_and_tailscale_client():
+    h = _handler({"Host": H._local_hostname()})
+    assert h._host_header_ok()
+
+    h_ts = _handler({"Host": "anything.custom.domain"})
+    h_ts.client_address = ("100.103.110.85", 50100)
+    assert h_ts._host_header_ok()
 
 
 def test_trusted_hosts_env(monkeypatch):
