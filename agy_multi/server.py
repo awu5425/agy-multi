@@ -10,7 +10,7 @@ import urllib.parse
 import ipaddress
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 try:
     from .manager import ProfileManager
@@ -56,16 +56,46 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
             return False
 
     @classmethod
+    def _trusted_hosts_list(cls) -> List[str]:
+        raw = os.environ.get("AGY_MULTI_TRUSTED_HOSTS", "").strip()
+        if not raw:
+            return []
+        return [h.strip().lower() for h in raw.split(",") if h.strip()]
+
+    @classmethod
     def _is_trusted_hostname(cls, hostname: Optional[str]) -> bool:
         """Hostnames trusted for Origin/Host: localhost, loopback IPs, Tailscale CGNAT IPs,
-        or the user's own tailnet suffix (AGY_MULTI_TAILNET=xxx.ts.net). Never a bare prefix match."""
+        the user's own tailnet suffix (AGY_MULTI_TAILNET=xxx.ts.net),
+        or explicitly declared trusted hosts in AGY_MULTI_TRUSTED_HOSTS."""
         if not hostname:
             return False
         h = hostname.strip("[]").lower()
         if h == "localhost" or cls._is_loopback_ip(h) or cls._is_tailscale_ip(h):
             return True
+        for th in cls._trusted_hosts_list():
+            if th.startswith("*.") and h.endswith(th[1:]):
+                return True
+            if th.startswith(".") and h.endswith(th):
+                return True
+            if h == th:
+                return True
         suffix = cls._tailnet_suffix()
         return bool(suffix and h.endswith(suffix))
+
+    @classmethod
+    def _is_trusted_host_header(cls, hostname: Optional[str]) -> bool:
+        """Hostnames trusted for incoming Host header (DNS-rebinding guard):
+        All trusted hostnames, plus Cloudflare quick tunnels (*.trycloudflare.com).
+        Cloudflare owns trycloudflare.com DNS, which always resolves to Cloudflare Anycast IPs,
+        preventing any DNS-rebinding attacks to loopback/private IPs."""
+        if not hostname:
+            return False
+        h = hostname.strip("[]").lower()
+        if cls._is_trusted_hostname(h):
+            return True
+        if h.endswith(".trycloudflare.com") or h == "trycloudflare.com":
+            return True
+        return False
 
     def _host_header_ok(self) -> bool:
         """DNS-rebinding guard: without a token, Host must be an IP literal or a trusted name."""
@@ -79,7 +109,7 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
             ipaddress.ip_address(hostname)
             return True
         except ValueError:
-            return self._is_trusted_hostname(hostname)
+            return self._is_trusted_host_header(hostname)
 
     def _post_csrf_ok(self) -> bool:
         """CSRF guard: JSON content-type forces a CORS preflight; Origin (if sent) must be trusted or same-origin."""
@@ -131,6 +161,9 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
             return None
         try:
             parsed = urllib.parse.urlparse(origin)
+            host_header = self.headers.get("Host", "")
+            if parsed.netloc and parsed.netloc == host_header:
+                return origin
             if self._is_trusted_hostname(parsed.hostname):
                 return origin
         except Exception:

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-09-30
+
+### Fixed & Security (隧道访问与安全主机头放行)
+- **修复外网隧道（Cloudflare Tunnel）访问报 403 错误**：
+  - 修复 DNS Rebinding 防护机制未放行 Cloudflare Quick Tunnel 官方代理域名导致无法加载看板页面的缺陷（`Forbidden: untrusted Host header`）；
+  - `_is_trusted_host_header` 原生支持 `*.trycloudflare.com`，由于 Cloudflare 官方 Anycast 节点绝不解析至本地回环/私网 IP，天然杜绝 DNS Rebinding 攻击；
+  - 严格保持跨域（CORS / CSRF）隔离边界：任意第三方 Tunnel 域名若作为 Cross-Origin 请求访问本机仍然严密阻断，仅放行同源（Same-Origin）请求；
+  - 新增 `AGY_MULTI_TRUSTED_HOSTS` 环境变量配置：支持用户声明自定义域名、反向代理与命名隧道域名列表（如 `dash.example.com,*.corp.internal`）；
+- **全量测试套件扩充至 106 项**：新增 Cloudflare Tunnel 域名 Host 校验、自定义受信任主机环境变量及同源/跨域 CORS 边界校验测试。
+
 ## [1.5.3] - 2026-09-29
 
 ### Security & Reliability (安全加固与鲁棒性增强)

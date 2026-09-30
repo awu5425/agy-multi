@@ -50,10 +50,28 @@ def test_post_csrf_allows_same_origin_and_cli():
 
 @pytest.mark.parametrize("host,ok", [
     ("127.0.0.1:8989", True), ("localhost:8989", True), ("192.168.1.5:8989", True),
+    ("campaigns-xyz.trycloudflare.com", True), ("trycloudflare.com", True),
     ("rebind.attacker.com:8989", False), ("", False),
 ])
 def test_host_header_guard_without_token(host, ok):
     assert _handler({"Host": host})._host_header_ok() is ok
+
+
+def test_trusted_hosts_env(monkeypatch):
+    monkeypatch.setenv("AGY_MULTI_TRUSTED_HOSTS", "dash.example.com,*.my-corp.com")
+    assert _handler({"Host": "dash.example.com"})._host_header_ok()
+    assert _handler({"Host": "internal.my-corp.com"})._host_header_ok()
+    assert not _handler({"Host": "other.example.com"})._host_header_ok()
+
+
+def test_get_allowed_origin_same_origin_and_tunnel():
+    # Same-origin (Host matches Origin netloc) is allowed for CORS
+    h = _handler({"Host": "campaigns.trycloudflare.com", "Origin": "https://campaigns.trycloudflare.com"})
+    assert h._get_allowed_origin() == "https://campaigns.trycloudflare.com"
+
+    # Foreign origin on a tunnel must NOT be allowed CORS unless explicitly trusted
+    h_evil = _handler({"Host": "127.0.0.1:8989", "Origin": "https://evil.trycloudflare.com"})
+    assert h_evil._get_allowed_origin() is None
 
 
 def test_host_header_guard_skipped_with_token():
