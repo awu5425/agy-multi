@@ -1,15 +1,36 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 .pytest_cache/
-usage_dashboard.html
-jev-research/
-LOCAL_CONFIG*
-# Local agent notes. Not part of the public project.
-AGENTS.md
-HANDOFF.md
+
+# Environments & Dependencies
+venv/
+.venv/
+env/
+node_modules/
+
+# Logs & Temporary files
+*.log
 *.bak
 *.backup
+
+# Local Sensitive / Config files (NEVER commit secrets or private tokens)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+LOCAL_CONFIG*
+jev-research/
+usage_dashboard.html
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Packaging & Distribution
 build/
 dist/
 *.egg-info/
