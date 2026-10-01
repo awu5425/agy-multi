@@ -8,7 +8,7 @@ GitHub：`https://github.com/awu5425/agy-multi.git`（ops 单向同步副本）
 项目文件区：交付物按 ops 指定的项目投递区存放。应用凭据由 ops 授权；secrets 目录、授权名单和实际分发状态本轮未核验。
 共用规则：Hub `_collab.git`《项目接力约定》v1.4（已核对规则仓 commit `713bd29`；之后有新指令先核对最新规则）。
 当前负责人 / 状态 / 更新时间：`Antigravity` · 已完成接手验收，状态待命 · 2026-10-01 12:00 CST (UTC+8)。已确认并同步上一棒交接 `ae4101d`。
-本棒工作台 / 工作分支 / 基准 commit：`vm-0-4-ubuntu` 本机工作目录（`/home/agentuser/workspace/my_CLI_works/gemini-switch`） / `main` / `ae4101d`（v1.5.5）。未改动业务代码。
+本棒工作台 / 工作分支 / 基准 commit：Linux 开发机的项目工作副本 / `main` / `ae4101d`（v1.5.5）。未改动业务代码。
 文件清单及验证记录：接手验收建立隔离 `.venv` 并完成依赖安装与 109 项单测及静态分析；更新 `HANDOFF.md` 验收记录，不存凭据值。
 
 ---
