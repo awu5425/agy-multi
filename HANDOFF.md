@@ -7,7 +7,7 @@ GitHub：`https://github.com/awu5425/agy-multi.git`（ops 单向同步副本）
 同步范围与状态：Hub 已存在 `main` 及截至 v1.5.5 的版本标签；GitHub 同步本轮未核验，由 ops 确认，不能从 Hub push 成功推断。
 项目文件区：交付物按 ops 指定的项目投递区存放。应用凭据由 ops 授权；secrets 目录、授权名单和实际分发状态本轮未核验。
 共用规则：Hub `_collab.git`《项目接力约定》v1.4（已核对规则仓 commit `713bd29`；之后有新指令先核对最新规则）。
-当前负责人 / 状态 / 更新时间：`Antigravity` · 已完成接手验收，状态待命 · 2026-10-01 12:00 CST (UTC+8)。已确认并同步上一棒交接 `ae4101d`。
+当前负责人 / 状态 / 更新时间：`lady-hermes@sandbox` · 小任务完成（测试数据去 JWT 字面量），状态待命 · 2026-10-01 CST (UTC+8)。上一棒 `Antigravity` 接手验收 `7432a4e`。
 本棒工作台 / 工作分支 / 基准 commit：Linux 开发机的项目工作副本 / `main` / `ae4101d`（v1.5.5）。未改动业务代码。
 文件清单及验证记录：接手验收建立隔离 `.venv` 并完成依赖安装与 109 项单测及静态分析；更新 `HANDOFF.md` 验收记录，不存凭据值。
 
@@ -20,6 +20,7 @@ GitHub：`https://github.com/awu5425/agy-multi.git`（ops 单向同步副本）
 - **本地开发入口**：`agy-multi --help` 可确认 CLI；需要看板时使用独立本地环境和显式 `--host 127.0.0.1 --port <空闲端口>`，不触碰 Hub 的常驻服务。
 - **配置如何加载**：项目根 `.env` 不会自动加载。源码默认读取 `~/.config/agy-multi/env`，不存在时回退 `oauth.env`；既有进程环境值优先。模板只是变量清单，真实配置由 ops 经授权注入或放到实际支持的位置。CLI 的 host/port 应显式传参，不能假设模板值一定覆盖 CLI 默认值。
 - **最近验证**：
+  - 2026-10-01（gitleaks 门禁修复）：基准 `7432a4e`，Linux/Python 3.11，临时 HOME、无真实凭据、全新 `.venv`；只改 `tests/test_manager.py` 的 3 个假 JWT 构造方式。pytest **109 passed / exit 0**，两条 CI 同等 Ruff 检查 exit 0；gitleaks 8.30.1 扫工作树 **no leaks / exit 0**。历史中 3 条命中待 ops 按指纹加受控例外（阿呜已同意由其向 ops 说明）。
   - 2026-10-01（接手验收）：基准 `ae4101d`，Linux (Ubuntu 24.04) / Python 3.12.3，在全新 `.venv` 隔离环境中完成 editable 安装与开发工具链安装；pytest **109 passed / 9.83s / exit 0**，两条 CI 同等 Ruff 规则检查通过（`F821,F841,B023` 与 `F821,B023`，exit 0），CLI `--help` 与 `list` 入口通过（exit 0）。未重启共享 systemd 服务，未调用真实 OAuth 授权刷新接口，原生 Windows 与 Python 3.10/3.11 未在本机重测。
   - 2026-10-01（上一棒沙盒）：业务基准 `c721c8d`，Linux/Python 3.11，临时 HOME、无真实凭据：全新虚拟环境安装成功；pytest **109 passed / 6.58s / exit 0**，两条 CI 同等 Ruff 检查和 CLI help 通过。详情见 CHANGELOG 的 Unreleased。
 - **验证边界**：无凭据测试可使用临时 HOME/模拟数据；真实登录、凭据刷新或 relay 需要获授权的测试账号和隔离配置，不对现有开发会话操作。

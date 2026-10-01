@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+- 2026-10-01: build the three alg=none fake JWT fixtures in `tests/test_manager.py`
+  at runtime via `_unsigned_jwt()` instead of string literals, so the Hub→GitHub
+  gitleaks gate no longer flags them. Claims/behaviour unchanged (helper output is
+  byte-identical to the old literals); 109 passed, both CI Ruff selections pass.
+  The 3 historical hits (commits `ab4b63a`, `4b9ab2f`) are test fixtures, not
+  credentials, and are handled by an ops-side fingerprint allowlist, not history rewrite.
+
 ### Documentation
 - Keep onboarding metadata portable: use logical Hub project/rules names; actual
   endpoints, account/path mappings and credential references stay in access-controlled

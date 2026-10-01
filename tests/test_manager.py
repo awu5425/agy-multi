@@ -12,10 +12,24 @@ from agy_multi.manager import ProfileManager
 from agy_multi.utils import parse_jwt_payload, inspect_token_file
 
 
+def _unsigned_jwt(claims):
+    """Build an unsigned (alg=none) test JWT at runtime.
+
+    Keeps literal JWT strings out of the source so secret scanners (gitleaks)
+    don't flag fake fixtures. Not a credential: no signature, example.com emails.
+    """
+    import base64
+
+    def _b64(obj):
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{_b64({'alg': 'none'})}.{_b64(claims)}."
+
+
 def test_jwt_payload_decode():
     # Header: {"alg":"none"}, Payload: {"email":"test@example.com","sub":"123"}
-    # b64: eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20iLCJzdWIiOiIxMjMifQ
-    payload_jwt = "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20iLCJzdWIiOiIxMjMifQ."
+    payload_jwt = _unsigned_jwt({"email": "test@example.com", "sub": "123"})
     claims = parse_jwt_payload(payload_jwt)
     assert claims.get("email") == "test@example.com"
     assert claims.get("sub") == "123"
@@ -589,7 +603,7 @@ def test_login_profile_interactive(tmp_path, monkeypatch):
                 executed_env.update(env)
             token_path = mgr.get_token_path("testlogin")
             token_path.parent.mkdir(parents=True, exist_ok=True)
-            jwt = "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ImxvZ2luQGV4YW1wbGUuY29tIiwiZXhwIjoyNTI0NjA4MDAwfQ."
+            jwt = _unsigned_jwt({"email": "login@example.com", "exp": 2524608000})
             token_path.write_text(json.dumps({"token": {"id_token": jwt}}), encoding="utf-8")
         return subprocess.CompletedProcess(args=cmd, returncode=0)
 
@@ -616,7 +630,7 @@ def test_login_profile_existing_credentials(tmp_path, monkeypatch):
 
     token_path = mgr.get_token_path("testreauth")
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    jwt = "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InJlYXV0aEBleGFtcGxlLmNvbSIsImV4cCI6MjUyNDYwODAwMH0."
+    jwt = _unsigned_jwt({"email": "reauth@example.com", "exp": 2524608000})
     token_path.write_text(json.dumps({"token": {"id_token": jwt}}), encoding="utf-8")
 
     mock_agy = str(tmp_path / "fake_agy")
