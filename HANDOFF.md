@@ -1,6 +1,7 @@
 # HANDOFF
 
-当前权威仓库：Hub `/data/git/agy-multi.git`；`hub` remote 使用本机获授权账号，不能复制上一位的机器身份。
+当前权威仓库：Hub 项目仓 `agy-multi`（真实连接地址由授权接入记录提供）；`hub` remote 使用本机获授权账号，不能复制上一位的机器身份。
+私有接入信息：本文只记录逻辑项目名和仓库相对路径。真实主机、账号、本机目录映射及凭据引用由 ops/本机受控接入记录提供；不要写入可同步文档，缺少时向 ops 请求该项目授权，不扫描或猜测。
 集成分支：`main`
 GitHub：`https://github.com/awu5425/agy-multi.git`（ops 单向同步副本）
 同步范围与状态：Hub 已存在 `main` 及截至 v1.5.5 的版本标签；GitHub 同步本轮未核验，由 ops 确认，不能从 Hub push 成功推断。

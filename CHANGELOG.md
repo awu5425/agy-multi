@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Documentation
+- Keep onboarding metadata portable: use logical Hub project/rules names; actual
+  endpoints, account/path mappings and credential references stay in access-controlled
+  records, not the synced handoff. Existing history has not been scrubbed.
 - 2026-10-01: clarify fresh-sandbox setup (isolated Python and explicit test tools),
   actual environment-file loading, Hub handoff state and ops/deployment boundaries.
 - Preserve v1.5.5 business code and release history. No new release/tag or production
