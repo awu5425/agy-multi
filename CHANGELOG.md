@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--help` exited 0. Used disposable HOME/config with no real application credentials.
   Python 3.10/3.12, native Windows, real OAuth/relay and shared deployment were not
   retested. Document references and comment-only environment-template changes checked.
+- Handoff acceptance validation (2026-10-01, base `ae4101d`, Linux/Python 3.12.3): isolated `.venv` setup,
+  editable install, pytest **109 passed in 9.83s, exit 0**, Ruff static checks and CLI entrypoints (`--help`, `list`) passed.
+  No changes to business code or shared services.
 
 ## [1.5.5] - 2026-10-01
 
