@@ -238,3 +238,64 @@ The fallback policy decides: `pause` (default) prints the exact countdown to the
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+
+## Developer onboarding
+
+This section is for a fresh development checkout, not production deployment.
+Use the Hub repository and your own authorized machine account for a migrated
+project; see HANDOFF.md for its integration branch and current work state.
+
+### Isolated Python and test tools
+
+Python 3.10+ is supported. There are no third-party **runtime** dependencies,
+but tests and linting require development tools, matching `.github/workflows/ci.yml`.
+From the repository root, create a virtual environment:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+python -m pip install pytest pytest-asyncio ruff
+```
+
+On Windows PowerShell, use `py -3 -m venv .venv` and then
+`.\.venv\Scripts\Activate.ps1`; alternatively invoke the environment's Python
+executable directly if activation is restricted. Do not disable system policy
+or use `--break-system-packages` as the default workaround.
+
+```bash
+python -m pytest -v
+ruff check --select F821,F841,B023 agy_multi tests/test_audit_fixes.py
+ruff check --select F821,B023 tests
+agy-multi --help
+```
+
+Report test counts, skipped/failed cases, exit status, environment and code
+version separately. Run affected tests for a small code change, the full suite
+for shared runtime/security changes. Pure documentation changes need document
+and command consistency checks, not a fabricated business-test pass.
+
+### Configuration and safe local use
+
+`.env.example` lists variables; a root `.env` is **not automatically loaded**.
+`load_env_config()` reads `~/.config/agy-multi/env`, falling back to `oauth.env`
+when the default file is absent. Existing process environment variables win.
+Ask authorized ops to provision only the test credentials needed by the task;
+do not put real values in Git, chat, logs or handoff documents. The placeholder
+`***` is not a working credential.
+
+For a local dashboard in a disposable development environment, use an available
+port and explicit binding, for example `agy-multi serve --host 127.0.0.1 --port 18989`.
+The CLI supplies defaults for host/port, so do not assume a file variable overrides
+a CLI argument. A fresh dashboard may have no account data; that is not proof of
+real-account integration. Do not import existing user accounts just to smoke-test.
+
+Real `login`, token refresh, quota queries or relay require authorized test
+account state and, where needed, OAuth client configuration or a supported local
+Antigravity installation. Offline tests use temporary fixtures/mocks and do not
+prove these integrations. If access is missing, report it as not tested.
+
+The shared systemd dashboard and public tunnels mentioned in historical notes
+belong to a separate deployment. Starting/restarting them, changing authentication
+or making services public is not part of ordinary local onboarding.

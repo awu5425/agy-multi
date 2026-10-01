@@ -1,37 +1,31 @@
 # HANDOFF
 
-当前权威仓库：`/data/git/agy-multi.git`（Hub 本机集中仓库，Tailscale `100.83.177.95`）  
-集成分支：`main`  
-GitHub：`https://github.com/awu5425/agy-multi.git`  
-同步范围与状态：`main` 分支与全部版本 tag（截至 v1.5.5）；GitHub 待 ops 同步  
-项目文件区：`/data/drop/agy-multi/`（交接交付区）；真实密钥由 ops 集中放于 `/data/secrets/agy-multi/`  
-共用规则：`/data/git/_collab.git`（《项目接力约定》v1.2）  
-当前负责人 / 更新时间：Antigravity / 2026-10-01 02:00 CST (UTC+8)  
-本棒工作台 / 工作分支 / 基准 commit：`/home/agentuser/workspace/my_CLI_works/gemini-switch` / `main` / `119d033`  
+当前权威仓库：Hub `/data/git/agy-multi.git`；`hub` remote 使用本机获授权账号，不能复制上一位的机器身份。
+集成分支：`main`
+GitHub：`https://github.com/awu5425/agy-multi.git`（ops 单向同步副本）
+同步范围与状态：Hub 已存在 `main` 及截至 v1.5.5 的版本标签；GitHub 同步本轮未核验，由 ops 确认，不能从 Hub push 成功推断。
+项目文件区：交付物按 ops 指定的项目投递区存放。应用凭据由 ops 授权；secrets 目录、授权名单和实际分发状态本轮未核验。
+共用规则：Hub `_collab.git`《项目接力约定》v1.4（已核对规则仓 commit `713bd29`；之后有新指令先核对最新规则）。
+当前负责人 / 状态 / 更新时间：`smartbean@sandbox` · 本棒文档工作已完成，待下一棒明确接手 · 2026-10-01。上一开发记录为 Antigravity；其旧会话是否仍运行未核验，接手代码前须确认。
+本棒工作台 / 工作分支 / 基准 commit：独立 Linux 沙盒工作副本 / `main` / `c721c8d4c430c702412ac254330356bb9f128bdb`（v1.5.5）。本次没有修改业务代码，最终交付 commit 见交接消息。
+文件清单及验证记录：本轮改 `HANDOFF.md`、`AGENTS.md`、`README.md`、`.env.example` 的说明与 `CHANGELOG.md`；具体提交、检查结果见 changelog/交接消息，不存凭据值。
 
 ---
 
 ## 安装、构建与测试入口 / 验收环境
 
-- **运行环境**：Python ≥ 3.10（已在 Python 3.10 / 3.11 / 3.12 验证通过，零外部运行时依赖）
-- **安装命令**：
-  ```bash
-  pip install -e . --break-system-packages --no-deps
-  ```
-- **自动化测试**：
-  ```bash
-  pytest -v
-  ```
-  （当前 109 / 109 项测试全部 PASS，耗时 ~10s）
-- **代码静态检查**：
-  ```bash
-  ruff check --select F821,F841,B023 agy_multi tests/test_audit_fixes.py
-  ```
-- **常驻后台看板服务**：
-  - systemd 单元：`sudo systemctl status agy-multi-dashboard.service`（端口 8989）
-  - 本地与局域网：`http://127.0.0.1:8989`、`http://0.0.0.0:8989`
-  - Tailscale 访问：`http://vm-0-4-ubuntu.taila5af92.ts.net:8989` 或 `http://vm-0-4-ubuntu:8989`
-  - Cloudflare Quick Tunnel：`/tmp/cloudflared-8989.log`
+- **新环境入口**：先读 `README.md` 的 `Developer onboarding`；Python ≥3.10，隔离虚拟环境安装项目及测试工具。零外部运行时依赖不等于 pytest/ruff 已预装，不用 `--break-system-packages` 改系统 Python。
+- **测试命令**：激活虚拟环境后执行 `python -m pytest -v`；静态检查见 README，与 CI 的两条 Ruff 选择规则一致。
+- **本地开发入口**：`agy-multi --help` 可确认 CLI；需要看板时使用独立本地环境和显式 `--host 127.0.0.1 --port <空闲端口>`，不触碰 Hub 的常驻服务。
+- **配置如何加载**：项目根 `.env` 不会自动加载。源码默认读取 `~/.config/agy-multi/env`，不存在时回退 `oauth.env`；既有进程环境值优先。模板只是变量清单，真实配置由 ops 经授权注入或放到实际支持的位置。CLI 的 host/port 应显式传参，不能假设模板值一定覆盖 CLI 默认值。
+- **最近验证**：2026-10-01，业务基准 `c721c8d`，Linux/Python 3.11，临时 HOME、无真实凭据：全新虚拟环境安装成功；pytest **109 passed / 6.58s / exit 0**，两条 CI 同等 Ruff 检查和 CLI help 通过。详情见 CHANGELOG 的 Unreleased。Python 3.10/3.12、原生 Windows 仅有上一棒历史记录，本轮未重跑。
+- **验证边界**：无凭据测试可使用临时 HOME/模拟数据；真实登录、凭据刷新或 relay 需要获授权的测试账号和隔离配置，不对现有开发会话操作。
+
+### 既有部署（历史状态，仅 ops 按需核验）
+
+上一棒报告 Hub 上存在 `agy-multi-dashboard.service`，看板端口 8989，并有 Quick Tunnel。它们不是新沙盒自带环境，本轮未检查当前运行、ACL 可达性或临时 URL。
+
+开发交接不要求 sudo、重启共享服务或创建公开隧道；确需部署时交给当前 ops 并取得对应授权。`0.0.0.0` 是监听地址，不是客户端访问地址。
 
 ---
 
@@ -56,8 +50,8 @@ GitHub：`https://github.com/awu5425/agy-multi.git`
 
 ## 未完成、待合并、风险
 
-- **集成测试**：`agy-multi login` 真实交互授权与 `agy-multi creds --refresh` 需要真实 Google Cloud OAuth 凭据（`AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET`），未在脱机环境与 GitHub Actions CI 中自动化运行。
-- **Cloudflare Quick Tunnel 动态地址**：当前 Quick Tunnel 重启后地址会变化；如需公网固定访问建议由 ops 配置 Named Tunnel 或使用 Tailscale Funnel。
+- **真实联调未验证**：登录/刷新需有效测试账号、有效用户 token 和可用 OAuth client 配置。客户端凭据可能由已有 Antigravity 安装发现，也可由 ops 注入；变量名为 `AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET`。离线单测通过不代表真实登录/刷新可用；未授权时标记“联调未跑”，不复制生产账号状态。
+- **公网入口待决策**：历史 Quick Tunnel 地址会随重启变化。固定公网入口涉及授权、鉴权和网络暴露，只有阿呜明确要求时才交由 ops 评估；不是下一棒默认任务。
 
 ---
 
@@ -75,6 +69,7 @@ GitHub：`https://github.com/awu5425/agy-multi.git`
 
 ## 下一步
 
-1. 执行 Hub 仓库（`/data/git/agy-multi.git`）远程添加并推送 `main` 分支及所有 tags；
-2. 核对 Hub 远程引用一致性；
-3. 后续 GitHub 镜像同步由 ops 在 Hub 上统一配置。
+1. **已经完成**：Hub 首次接入；本次读取到 `main` 和版本标签。不要重复初始化仓库或覆盖已有远端。
+2. **待 ops**：核对 GitHub 对应引用/同步状态；如业务联调需要凭据，确认项目授权和安全配置入口。
+3. **待阿呜指定**：下一项功能、修复或重构；没有新目标就保持待接手，不自行发布、打 tag 或改变线上服务。
+4. **换人检查**：确认旧会话停写，读取 Hub 最新 handoff，用自己的账号 fetch，保留未提交改动，按本次改动范围测试并交付。

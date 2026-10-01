@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+- 2026-10-01: clarify fresh-sandbox setup (isolated Python and explicit test tools),
+  actual environment-file loading, Hub handoff state and ops/deployment boundaries.
+- Preserve v1.5.5 business code and release history. No new release/tag or production
+  credential/service change.
+- Validation (2026-10-01, base `c721c8d`, Linux/Python 3.11): fresh virtual environment,
+  editable installation and explicit development dependencies succeeded; pytest
+  **109 passed in 6.58s, exit 0**; both CI-equivalent Ruff selections passed; CLI
+  `--help` exited 0. Used disposable HOME/config with no real application credentials.
+  Python 3.10/3.12, native Windows, real OAuth/relay and shared deployment were not
+  retested. Document references and comment-only environment-template changes checked.
+
 ## [1.5.5] - 2026-10-01
 
 ### Fixed & Security (Tailscale 隧道与本地主机名放行)
