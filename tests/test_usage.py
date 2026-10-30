@@ -377,3 +377,321 @@ def test_claude_and_gemini_5h_disabled_when_weekly_depleted():
     assert "fillClaude5hClass = 'fill-red'" in html
     assert "showClaude5hAsDisabled ? t('disabledStatus')" in html
 
+
+def test_granular_model_quotas_render_and_groups_synthesis():
+    """Verify that specific targeted models (Gemini 4 Argon, Gemini 3.8 Flash, Claude Models)
+    are rendered in strict order with compact dual/single capsule meters."""
+    from agy_multi.usage import render_html_dashboard
+
+    mock_data = {
+        "accounts": [
+            {
+                "id": "3",
+                "name": "martin",
+                "email": "martin@example.com",
+                "auth": {"is_valid": True},
+                "active_pids": [],
+                "usability": {"code": "READY", "label": "● 可用", "is_usable": True},
+                "official_quota": {
+                    "available": True,
+                    "models": [
+                        {
+                            "id": "gemini-4-argon",
+                            "displayName": "Gemini 4 Argon",
+                            "provider": "Google Gemini",
+                            "providerCode": "gemini",
+                            "sortOrder": 1,
+                            "has5h": False,
+                            "hasWeekly": True,
+                            "remainingWkPct": 88.7,
+                            "resetWkTs": 1793284966.0,
+                            "tagTitle": "New",
+                            "supportsThinking": True,
+                        },
+                        {
+                            "id": "gemini-3.8-flash",
+                            "displayName": "Gemini 3.8 Flash",
+                            "provider": "Google Gemini",
+                            "providerCode": "gemini",
+                            "sortOrder": 2,
+                            "has5h": True,
+                            "hasWeekly": True,
+                            "remaining5hPct": 88.7,
+                            "reset5hTs": 1793284966.0,
+                            "remainingWkPct": 100.0,
+                            "resetWkTs": 1793284966.0,
+                            "supportsThinking": True,
+                        },
+                        {
+                            "id": "claude-models-5-5",
+                            "displayName": "Claude Models (Opus 5.5 / Sonnet 5.5)",
+                            "provider": "Anthropic Claude",
+                            "providerCode": "anthropic",
+                            "sortOrder": 3,
+                            "has5h": True,
+                            "hasWeekly": True,
+                            "remaining5hPct": 100.0,
+                            "reset5hTs": 1793284966.0,
+                            "remainingWkPct": 100.0,
+                            "resetWkTs": 1793284966.0,
+                            "tagTitle": "New",
+                            "supportsThinking": True,
+                        }
+                    ],
+                    "groups": {
+                        "gemini": {"buckets": {"gemini-5h": {"remainingPct": 88.7}, "gemini-weekly": {"remainingPct": 100.0}}},
+                        "claude_gpt": {"buckets": {"3p-5h": {"remainingPct": 100.0}, "3p-weekly": {"remainingPct": 100.0}}},
+                    }
+                },
+                "stats_5h": {"requests": 1, "total_tokens": 1000},
+                "stats_7d": {"requests": 2, "total_tokens": 2000},
+                "stats_all": {"requests": 2, "total_tokens": 2000},
+                "daily_stats": {},
+            },
+            {
+                "id": "1",
+                "name": "panya",
+                "email": "panya@example.com",
+                "auth": {"is_valid": True},
+                "active_pids": [],
+                "usability": {"code": "READY", "label": "● 可用", "is_usable": True},
+                "official_quota": {
+                    "available": True,
+                    "models": [
+                        {
+                            "id": "gemini-3.8-flash",
+                            "displayName": "Gemini 3.8 Flash",
+                            "provider": "Google Gemini",
+                            "providerCode": "gemini",
+                            "sortOrder": 1,
+                            "has5h": True,
+                            "hasWeekly": True,
+                            "remaining5hPct": 100.0,
+                            "reset5hTs": 1793284966.0,
+                            "remainingWkPct": 100.0,
+                            "resetWkTs": 1793284966.0,
+                            "supportsThinking": True,
+                        },
+                        {
+                            "id": "claude-models-4-6",
+                            "displayName": "Claude Models (Opus 4.6 / Sonnet 4.6)",
+                            "provider": "Anthropic Claude",
+                            "providerCode": "anthropic",
+                            "sortOrder": 2,
+                            "has5h": True,
+                            "hasWeekly": True,
+                            "remaining5hPct": 100.0,
+                            "reset5hTs": 1793284966.0,
+                            "remainingWkPct": 100.0,
+                            "resetWkTs": 1793284966.0,
+                            "tagTitle": "Thinking",
+                            "supportsThinking": True,
+                        }
+                    ],
+                    "groups": {
+                        "gemini": {"buckets": {"gemini-5h": {"remainingPct": 100.0}, "gemini-weekly": {"remainingPct": 100.0}}},
+                        "claude_gpt": {"buckets": {"3p-5h": {"remainingPct": 100.0}, "3p-weekly": {"remainingPct": 100.0}}},
+                    }
+                },
+                "stats_5h": {"requests": 0, "total_tokens": 0},
+                "stats_7d": {"requests": 0, "total_tokens": 0},
+                "stats_all": {"requests": 0, "total_tokens": 0},
+                "daily_stats": {},
+            }
+        ],
+        "totals": {"stats_5h": {}, "stats_7d": {}, "stats_all": {}}
+    }
+
+    html = render_html_dashboard(mock_data)
+    assert "models-container" in html
+    assert "model-quota-block" in html
+    assert "model-capsules" in html
+    assert "capsule-meter" in html
+    assert "Gemini 4 Argon" in html
+    assert "Gemini 3.8 Flash" in html
+    assert "Claude Models (Opus 5.5 / Sonnet 5.5)" in html
+    assert "Claude Models (Opus 4.6 / Sonnet 4.6)" in html
+    assert "labelWeekly" in html or "7D" in html
+
+
+def test_normalize_model_family():
+    from agy_multi.usage import normalize_model_family
+
+    assert normalize_model_family("gemini-4-argon") == "Gemini 4 Argon"
+    assert normalize_model_family("gemini-4-argon-thinking") == "Gemini 4 Argon"
+    assert normalize_model_family("gemini-3.8-flash-high") == "Gemini 3.8 Flash"
+    assert normalize_model_family("gemini-3.8-flash") == "Gemini 3.8 Flash"
+    assert normalize_model_family("claude-opus-5-5-high") == "Claude Models"
+    assert normalize_model_family("claude-sonnet-5-5") == "Claude Models"
+    assert normalize_model_family("claude-opus-4-6-thinking") == "Claude Models"
+    assert normalize_model_family("gemini-2.5-pro") == "Gemini Pro"
+    assert normalize_model_family("gpt-oss-120b") == "GPT Models"
+    assert normalize_model_family(None) == "Gemini 3.8 Flash"
+    assert normalize_model_family("") == "Gemini 3.8 Flash"
+    assert normalize_model_family("custom-unknown-engine") == "Other"
+
+
+def test_extract_model_resolver_and_token_curve_rendering(tmp_path):
+    import sqlite3
+    from agy_multi.usage import extract_model_resolver, render_html_dashboard
+
+    # Create a mock sqlite DB with gen_metadata
+    db_file = tmp_path / "test_convo.db"
+    conn = sqlite3.connect(str(db_file))
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE gen_metadata (idx integer, data blob, size integer NOT NULL DEFAULT 0, PRIMARY KEY (idx));")
+    
+    # Empty DB fallback
+    resolver_empty = extract_model_resolver(conn)
+    assert resolver_empty(0) == "Gemini 3.8 Flash"
+    conn.close()
+
+    # Test dashboard HTML rendering includes the new 'By Model' dimension & curve assets
+    mock_data = {
+        "timestamp": 1700000000.0,
+        "accounts": [],
+        "totals": {
+            "stats_5h": {"requests": 10, "total_tokens": 1000, "models": {"Gemini 3.8 Flash": 1000}},
+            "stats_7d": {"requests": 50, "total_tokens": 5000, "models": {"Gemini 3.8 Flash": 5000}},
+            "stats_all": {"requests": 100, "total_tokens": 10000, "models": {"Gemini 3.8 Flash": 10000}},
+        },
+        "totals_calendar": {
+            "2026-10-29": {
+                "date": "2026-10-29",
+                "total_tokens": 10000,
+                "requests": 5,
+                "prompt_tokens": 8000,
+                "cached_tokens": 1000,
+                "candidate_tokens": 1000,
+                "thinking_tokens": 500,
+                "output_tokens": 500,
+                "models": {"Gemini 4 Argon": 6000, "Gemini 3.8 Flash": 4000},
+            }
+        }
+    }
+    html = render_html_dashboard(mock_data)
+    assert 'id="btn-dim-models"' in html
+    assert 'dimModels' in html
+    assert 'setTrendDimension(\'models\'' in html
+    assert 'buildSmoothPathForModel' in html
+    assert 'MODEL_COLORS' in html
+    assert 'data-models=' in html
+
+
+def test_argon_quota_extraction_and_weekly_exhaustion(tmp_path, monkeypatch):
+    """Verify that Gemini 4 Argon extracts true weekly quota, never leaks 5H quotas,
+    and correctly marks exhaustion when weekly quota is exhausted."""
+    import json
+    import io
+    import urllib.request
+    from agy_multi.usage import fetch_official_quota
+
+    pdir = tmp_path / "martin"
+    cli = pdir / ".gemini" / "antigravity-cli"
+    cli.mkdir(parents=True)
+    (cli / "antigravity-oauth-token").write_text(
+        json.dumps({
+            "token": {
+                "access_token": "ya29.valid_token",
+                "refresh_token": "1//refresh",
+                "expiry": "2099-01-01T00:00:00Z",
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    class MockHTTPResponse:
+        def __init__(self, data_dict):
+            self._data = json.dumps(data_dict).encode("utf-8")
+        def read(self):
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    def mock_urlopen(req, *args, **kwargs):
+        url = req.full_url
+        if "retrieveUserQuotaSummary" in url:
+            return MockHTTPResponse({
+                "groups": [
+                    {
+                        "displayName": "Claude and GPT models",
+                        "buckets": [
+                            {
+                                "bucketId": "3p-weekly",
+                                "window": "weekly",
+                                "resetTime": "2026-11-05T17:01:17Z",
+                                "remainingFraction": 0,
+                            },
+                            {
+                                "bucketId": "3p-5h",
+                                "window": "5h",
+                                "resetTime": "2026-10-30T04:35:29Z",
+                                "remainingFraction": 0,
+                                "disabled": True,
+                            }
+                        ]
+                    }
+                ]
+            })
+        elif "fetchAvailableModels" in url:
+            return MockHTTPResponse({
+                "models": {
+                    "gemini-2.5-pro": {
+                        "displayName": "Gemini 2.5 Pro",
+                        "quotaInfo": {
+                            "remainingFraction": 0.941,
+                            "resetTime": "2026-10-30T04:35:29Z",
+                        }
+                    },
+                    "gemini-3.8-flash-tiered": {
+                        "displayName": "Gemini 3.8 Flash",
+                        "quotaInfo": {
+                            "remainingFraction": 0.941,
+                            "resetTime": "2026-10-30T04:35:29Z",
+                        }
+                    },
+                    "claude-opus-5-5-high": {
+                        "displayName": "Claude Opus 5.5",
+                        "quotaInfo": {
+                            "resetTime": "2026-11-05T17:01:17Z",
+                        }
+                    }
+                }
+            })
+        return MockHTTPResponse({})
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    res = fetch_official_quota(pdir)
+    assert res["available"] is True
+    models = {m["id"]: m for m in res["models"]}
+    assert "gemini-4-argon" in models
+    assert "gemini-3.8-flash" in models
+    assert "claude-models-5-5" in models
+
+    argon = models["gemini-4-argon"]
+    assert argon["has5h"] is False
+    assert argon["hasWeekly"] is True
+    # Must NOT inherit 5h 94.1% or 4h reset time from gemini-2.5-pro
+    assert argon["remainingFraction"] == 0.0
+    assert argon["remainingPct"] == 0.0
+    assert argon["remainingWkPct"] == 0.0
+    assert argon["resetTime"] == "2026-11-05T17:01:17Z"
+
+    flash = models["gemini-3.8-flash"]
+    assert flash["has5h"] is True
+    assert flash["remainingPct"] == 94.1
+    assert flash["remaining5hPct"] == 94.1
+    assert flash["remainingWkPct"] == 100.0
+    assert flash["resetTime"] == "2026-10-30T04:35:29Z"
+
+    # Groups synthesis must NOT make gemini-5h 0% just because Argon is exhausted
+    g_5h = res["groups"]["gemini"]["buckets"]["gemini-5h"]
+    assert g_5h["remainingPct"] == 94.1
+
+
+
+
+

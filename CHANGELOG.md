@@ -7,13 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Tests
-- 2026-10-01: build the three alg=none fake JWT fixtures in `tests/test_manager.py`
-  at runtime via `_unsigned_jwt()` instead of string literals, so the Hub→GitHub
-  gitleaks gate no longer flags them. Claims/behaviour unchanged (helper output is
-  byte-identical to the old literals); 109 passed, both CI Ruff selections pass.
-  The 3 historical hits (commits `ab4b63a`, `4b9ab2f`) are test fixtures, not
-  credentials, and are handled by an ops-side fingerprint allowlist, not history rewrite.
+## [1.6.0] - 2026-10-30
+
+### Added
+- **细粒度模型配额监控与紧凑胶囊柱 (Granular Per-Model Quota Tracking & Compact Dual Capsules)**:
+  - 针对拥有高级模型的账号（`agy-3` / `agy-5`），按指定优先级呈现目标模型：
+    1. `Gemini 4 Argon`（单 7D 额度柱）
+    2. `Gemini 3.8 Flash`（5H + 7D 双额度柱）
+    3. `Claude Models (Opus 5.5 / Sonnet 5.5)`（5H + 7D 双额度柱）
+  - 普通账号精简呈现 `Gemini 3.8 Flash` 与 `Claude Models (Opus 4.6 / Sonnet 4.6)` 双胶囊额度柱。
+  - CLI `agy-multi usage` 增加 `-m` / `--models` 参数，输出各账号下专属模型的 7D/5H 细粒度额度与重置倒计时表格；`agy-multi status` 增加可用模型列表输出。
+- **Token 消耗走势图“按模型”多维曲线 (Token Trend Curves by Model Family)**:
+  - 看板 Token 走势曲线新增“按模型 (By Model)”聚合维度，可对比查看 Gemini 4 Argon、Gemini 3.8 Flash、Claude Models 等多系列消耗趋势。
+  - 支持交互式图例点击切换显隐，并配备专属配色高亮。
+
+### Fixed & Security
+- **修复 Gemini 4 Argon 配额提取与周额度同步异常**:
+  - 修复 `_extract_q` 错误回退到 5 小时模型 `gemini-2.5-pro` 导致 Argon 错误显示 92.6% 且显示 4 小时倒计时的缺陷。
+  - Argon 准确同步个人订阅层级（`3p-weekly`）周额度：当账号周限额耗尽时，Argon 真实标记为 0.0% 红色枯竭状态并准确显示 7 天级（约 161h）重置倒计时。
+  - 优化 Gemini 组别合成算法，确保 Flash 5H 额度不受 Argon 耗尽误导，保持正常可用调度状态。
+- **账号列表数字 ID 排序规范**:
+  - `ProfileManager` 在加载注册表、添加及更新配置文件时统一按 numeric ID 升序排序，确保 ID 1~5 严格按序呈现。
+- **代码与测试数据全面脱敏 & 门禁通过**:
+  - 确保测试套件中所有邮箱与配置占位符使用标准 `example.com` 测试域，杜绝真实账号与私有凭据外泄。
+  - 运行时动态构造假 JWT 测试固件（`_unsigned_jwt()`），彻底消除字面量特征，通过 gitleaks 门禁扫描。
+- **测试套件扩充至 113 项**:
+  - 新增 Argon 周配额提取与耗尽验证测试、模型解析器与走势图多维渲染测试，覆盖率 100% 通过。
 
 ### Documentation
 - Keep onboarding metadata portable: use logical Hub project/rules names; actual

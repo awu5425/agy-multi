@@ -132,7 +132,12 @@ class ProfileManager:
     def list_profiles(self) -> List[Dict[str, Any]]:
         registry = self._load_registry()
         results = []
-        for p in registry.get("profiles", []):
+        raw_profiles = registry.get("profiles", [])
+        try:
+            sorted_profiles = sorted(raw_profiles, key=lambda p: int(p.get("id", 0)) if str(p.get("id", "")).isdigit() else 999)
+        except Exception:
+            sorted_profiles = raw_profiles
+        for p in sorted_profiles:
             name = p.get("name")
             pdir = self.get_profile_dir(name)
             token_file = self.get_token_path(name)
@@ -224,6 +229,10 @@ class ProfileManager:
                 new_profile["inheritance_report"] = inherit_report
 
         profiles.append(new_profile)
+        try:
+            profiles = sorted(profiles, key=lambda p: int(p.get("id", 0)) if str(p.get("id", "")).isdigit() else 999)
+        except Exception:
+            pass
         registry["profiles"] = profiles
         self._save_registry(registry)
         return new_profile
@@ -360,6 +369,10 @@ class ProfileManager:
             target["region_restricted"] = bool(region_restricted)
 
         profiles[target_idx] = target
+        try:
+            profiles = sorted(profiles, key=lambda p: int(p.get("id", 0)) if str(p.get("id", "")).isdigit() else 999)
+        except Exception:
+            pass
         registry["profiles"] = profiles
         self._save_registry(registry)
         return target

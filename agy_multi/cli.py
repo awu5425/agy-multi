@@ -131,6 +131,14 @@ def cmd_status(manager: ProfileManager, args: argparse.Namespace) -> int:
     print(f"  • Health       : {status_color}{u_code}{RESET}")
     print(f"  • Weekly Quota : {CYAN}{g_wk_pct:.1f}%{RESET} (Reset: {g_wk_reset})")
     print(f"  • 5H Quota     : {CYAN}{g_5h_pct:.1f}%{RESET} (Reset: {g_5h_reset})")
+    models = oq.get("models", [])
+    if models:
+        print(f"  • Models ({len(models)} available):")
+        for m in models:
+            m_rem = m.get("remainingPct", 100.0)
+            m_col = GREEN if m_rem > 25 else (YELLOW if m_rem > 10 else RED)
+            tag_s = f" [{m['tagTitle']}]" if m.get("tagTitle") else ""
+            print(f"    - {m['displayName']:30} : {m_col}{m_rem:>5.1f}%{RESET}{tag_s}")
     print(f"  • Status       : {GREEN}Active PID {pids_str}{RESET}" if pids else f"  • Status       : {CYAN}Idle{RESET}")
 
     auth_info = curr.get("auth", {})
@@ -334,6 +342,50 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
             pids
         ])
     print(format_table(rows, headers))
+
+    if getattr(args, "models", False):
+        m_headers = ["ID", "Account", "Provider", "Model", "Quota (7D / 5H)", "Reset In", "Tags"]
+        m_rows = []
+        for acc in data.get("accounts", []):
+            models = acc.get("official_quota", {}).get("models", [])
+            for m in models:
+                if m.get("has5h") is False:
+                    wk = m.get("remainingWkPct", m.get("remainingPct", 100))
+                    c_wk = GREEN if wk > 25 else (YELLOW if wk > 10 else RED)
+                    quota_str = f"7D: {c_wk}{wk:.1f}%{RESET}"
+                else:
+                    wk = m.get("remainingWkPct", 100)
+                    h5 = m.get("remaining5hPct", m.get("remainingPct", 100))
+                    c_wk = GREEN if wk > 25 else (YELLOW if wk > 10 else RED)
+                    c_5h = GREEN if h5 > 25 else (YELLOW if h5 > 10 else RED)
+                    quota_str = f"7D: {c_wk}{wk:.1f}%{RESET} | 5H: {c_5h}{h5:.1f}%{RESET}"
+                reset_ts = m.get("resetTs")
+                reset_str = "-"
+                if reset_ts and m.get("remainingPct", 100) < 100:
+                    diff = max(0, int(reset_ts - time.time()))
+                    h = diff // 3600
+                    mins = (diff % 3600) // 60
+                    reset_str = f"{h}h {mins}m"
+                elif m.get("remainingPct", 100) == 100:
+                    reset_str = "Full"
+                tags = []
+                if m.get("tagTitle"):
+                    tags.append(m["tagTitle"])
+                if m.get("supportsThinking") and m.get("tagTitle") != "Thinking":
+                    tags.append("Thinking")
+                tag_str = ", ".join(tags) if tags else "-"
+                m_rows.append([
+                    acc.get("id"),
+                    acc.get("name"),
+                    m.get("provider", "Other"),
+                    m.get("displayName", m.get("id")),
+                    quota_str,
+                    reset_str,
+                    tag_str
+                ])
+        if m_rows:
+            print(f"\n{BOLD}=== Granular Per-Model Quotas Breakdown ==={RESET}\n")
+            print(format_table(m_rows, m_headers))
 
     tot_5 = data["totals"]["stats_5h"]
     tot_7 = data["totals"]["stats_7d"]
@@ -1447,6 +1499,7 @@ def main():
     p_usage.add_argument("--html", nargs="?", const="", help="Specify path to output HTML dashboard")
     p_usage.add_argument("--json", action="store_true", help="Output raw JSON data")
     p_usage.add_argument("--csv", action="store_true", help="Output raw CSV data")
+    p_usage.add_argument("-m", "--models", action="store_true", help="Show granular per-model quotas breakdown table")
 
     # serve / server / web / dash-server
     p_serve = subparsers.add_parser("serve", aliases=["server", "web", "dash-server"], help="Run real-time usage dashboard web server")

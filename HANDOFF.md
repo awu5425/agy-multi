@@ -7,9 +7,9 @@ GitHub：`https://github.com/awu5425/agy-multi.git`（ops 单向同步副本）
 同步范围与状态：Hub 已存在 `main` 及截至 v1.5.5 的版本标签；GitHub 同步本轮未核验，由 ops 确认，不能从 Hub push 成功推断。
 项目文件区：交付物按 ops 指定的项目投递区存放。应用凭据由 ops 授权；secrets 目录、授权名单和实际分发状态本轮未核验。
 共用规则：Hub `_collab.git`《项目接力约定》v1.4（已核对规则仓 commit `713bd29`；之后有新指令先核对最新规则）。
-当前负责人 / 状态 / 更新时间：`lady-hermes@sandbox` · 小任务完成（测试数据去 JWT 字面量），状态待命 · 2026-10-01 CST (UTC+8)。上一棒 `Antigravity` 接手验收 `7432a4e`。
-本棒工作台 / 工作分支 / 基准 commit：Linux 开发机的项目工作副本 / `main` / `ae4101d`（v1.5.5）。未改动业务代码。
-文件清单及验证记录：接手验收建立隔离 `.venv` 并完成依赖安装与 109 项单测及静态分析；更新 `HANDOFF.md` 验收记录，不存凭据值。
+当前负责人 / 状态 / 更新时间：`Antigravity` · 已完成 v1.6.0 发布，全量测试通过 · 2026-10-30 09:40 CST (UTC+8)。
+本棒工作台 / 工作分支 / 基准 commit：Linux 开发机的项目工作副本 / `main` / `80124f5`（v1.5.5）。
+文件清单及验证记录：113 项单测与 Ruff 静态检查全量通过，数据全面脱敏，发布 v1.6.0。
 
 ---
 
@@ -48,6 +48,7 @@ GitHub：`https://github.com/awu5425/agy-multi.git`（ops 单向同步副本）
 | **v1.5.3** | ✅ 已发布 | `secure_write` 临时文件原子替换与断电防损坏，302 跳转保留非 token 参数，启动日志 Token 脱敏 |
 | **v1.5.4** | ✅ 已发布 | 修复 Cloudflare 隧道 403 阻断，支持 `AGY_MULTI_TRUSTED_HOSTS` |
 | **v1.5.5** | ✅ 已发布 | 修复 Tailscale MagicDNS（`*.ts.net`）与短主机名 403 阻断，放行 WireGuard CGNAT 客户端直连 |
+| **v1.6.0** | ✅ 已发布 | 细粒度模型配额监控（Gemini 4 Argon / 3.8 Flash / Claude 5.5/4.6）、Argon周额度校准、Token模型趋势曲线与数据脱敏 |
 | **Hub 接入** | ✅ 已就绪 | 根目录完成入库规范对齐：补充 `.gitignore`、`.env.example`、规则仓标准引用与交接文件标准化 |
 
 ---

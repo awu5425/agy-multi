@@ -102,6 +102,141 @@ def parse_step_metadata(data: bytes) -> Dict[str, Any]:
     return res
 
 
+def normalize_model_family(raw: Optional[str]) -> str:
+    """Normalize model string into canonical model family display names:
+    'Gemini 4 Argon', 'Gemini 3.8 Flash', 'Claude Models', 'Gemini Pro', 'GPT Models', 'Other'.
+    """
+    if not raw:
+        return "Gemini 3.8 Flash"
+    lower = raw.lower()
+    if "argon" in lower:
+        return "Gemini 4 Argon"
+    if "flash" in lower:
+        return "Gemini 3.8 Flash"
+    if any(k in lower for k in ("claude", "opus", "sonnet")):
+        return "Claude Models"
+    if "pro" in lower or "ultra" in lower:
+        return "Gemini Pro"
+    if "gpt" in lower:
+        return "GPT Models"
+    return "Other"
+
+
+def extract_model_resolver(conn: sqlite3.Connection):
+    """Extract model mappings from gen_metadata and return a callable get_model(step_idx) -> str."""
+    mapping = {}
+    gen_models = []
+    default_family = "Gemini 3.8 Flash"
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT idx, data FROM gen_metadata WHERE data IS NOT NULL ORDER BY idx ASC;")
+        rows = cur.fetchall()
+        for g_idx, blob in rows:
+            pos = 0
+            model = None
+            last_idx = None
+            while pos < len(blob):
+                key, pos = decode_varint(blob, pos)
+                fn, wt = key >> 3, key & 0x7
+                if wt == 0:
+                    val, pos = decode_varint(blob, pos)
+                elif wt == 2:
+                    length, pos = decode_varint(blob, pos)
+                    sub = blob[pos:pos+length]
+                    pos += length
+                    if fn == 1:
+                        sp = 0
+                        while sp < len(sub):
+                            sk, sp = decode_varint(sub, sp)
+                            sfn, swt = sk >> 3, sk & 0x7
+                            if swt == 0:
+                                _, sp = decode_varint(sub, sp)
+                            elif swt == 2:
+                                slen, sp = decode_varint(sub, sp)
+                                sbytes = sub[sp:sp+slen]
+                                sp += slen
+                                if sfn in (19, 21) and not model:
+                                    try:
+                                        m = sbytes.decode("utf-8", errors="ignore").strip()
+                                        if m:
+                                            model = m
+                                    except Exception:
+                                        pass
+                                elif sfn == 20:
+                                    try:
+                                        txt = sbytes.decode("utf-8", errors="ignore")
+                                        if "last_step_index" in txt:
+                                            import re
+                                            match = re.search(r"\d+", txt)
+                                            if match:
+                                                last_idx = int(match.group(0))
+                                    except Exception:
+                                        pass
+                            elif swt == 1:
+                                sp += 8
+                            elif swt == 5:
+                                sp += 4
+                            else:
+                                break
+                    elif fn == 3:
+                        sp = 0
+                        while sp < len(sub):
+                            sk, sp = decode_varint(sub, sp)
+                            sfn, swt = sk >> 3, sk & 0x7
+                            if swt == 0:
+                                _, sp = decode_varint(sub, sp)
+                            elif swt == 2:
+                                slen, sp = decode_varint(sub, sp)
+                                sbytes = sub[sp:sp+slen]
+                                sp += slen
+                                if sfn == 28 and not model:
+                                    try:
+                                        m = sbytes.decode("utf-8", errors="ignore").strip()
+                                        if m:
+                                            model = m
+                                    except Exception:
+                                        pass
+                            elif swt == 1:
+                                sp += 8
+                            elif swt == 5:
+                                sp += 4
+                            else:
+                                break
+                elif wt == 1:
+                    pos += 8
+                elif wt == 5:
+                    pos += 4
+                else:
+                    break
+
+            if model:
+                fam = normalize_model_family(model)
+                gen_models.append((g_idx, last_idx, fam))
+                mapping[g_idx] = fam
+                if last_idx is not None:
+                    mapping[last_idx] = fam
+                    mapping[last_idx + 1] = fam
+
+        if gen_models:
+            default_family = gen_models[-1][2]
+    except Exception:
+        pass
+
+    def get_model(s_idx: int) -> str:
+        if s_idx in mapping:
+            return mapping[s_idx]
+        chosen = None
+        for g_idx, l_idx, fam in gen_models:
+            ref_idx = l_idx if l_idx is not None else g_idx
+            if s_idx >= ref_idx:
+                chosen = fam
+        if chosen:
+            return chosen
+        return default_family
+
+    return get_model
+
+
 def get_oauth_client_credentials() -> tuple[str, str]:
     """Read OAuth client credentials from environment only (no built-in secrets).
 
@@ -157,13 +292,13 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
     access_token = token_obj.get("access_token")
     refresh_token = token_obj.get("refresh_token")
 
-    def call_api(tok: str) -> Optional[Dict[str, Any]]:
+    def call_api(tok: str, endpoint: str = "retrieveUserQuotaSummary") -> Optional[Dict[str, Any]]:
         # daily-cloudcode-pa.googleapis.com is the prediction backend used by Antigravity CLI
-        # that tracks real-time 5H and weekly usage buckets.
+        # that tracks real-time 5H and weekly usage buckets as well as per-model quotas.
         for host in ["daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"]:
             try:
                 req = urllib.request.Request(
-                    f"https://{host}/v1internal:retrieveUserQuotaSummary",
+                    f"https://{host}/v1internal:{endpoint}",
                     data=b"{}",
                     headers={
                         "Authorization": f"Bearer {tok}",
@@ -190,12 +325,7 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
         except Exception:
             pass
 
-    data = None
-    if access_token and not is_token_expired:
-        try:
-            data = call_api(access_token)
-        except Exception:
-            pass
+    active_token = access_token if (access_token and not is_token_expired) else None
 
     # If access token was expired or missing, try refresh if credentials are configured
     if (is_token_expired or not access_token) and refresh_token:
@@ -218,6 +348,7 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
                 new_access_token = new_token_info.get("access_token")
                 if new_access_token:
                     token_obj["access_token"] = new_access_token
+                    active_token = new_access_token
                     if "expires_in" in new_token_info:
                         token_obj["expiry"] = datetime.fromtimestamp(
                             time.time() + new_token_info["expires_in"], tz=timezone.utc
@@ -227,7 +358,6 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
                         secure_write_json(token_file, auth_data, mode=0o600)
                     except Exception:
                         pass
-                    data = call_api(new_access_token)
         except urllib.error.HTTPError as e:
             err_body = ""
             try:
@@ -240,42 +370,358 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
         except Exception as e:
             return {"available": False, "reason": f"Token 刷新失败: {e}"}
 
-    if not data:
+    if not active_token:
+        return {"available": False, "reason": "无法获取配额数据 (无可用 Access Token)"}
+
+    # Query both aggregate quota summary and available individual model quotas
+    summary_data = call_api(active_token, "retrieveUserQuotaSummary")
+    models_data = call_api(active_token, "fetchAvailableModels")
+
+    if not summary_data and not models_data:
         return {"available": False, "reason": "无法获取配额数据"}
 
-    res = {"available": True, "raw": data, "groups": {}}
-    for g in data.get("groups", []):
-        g_name = g.get("displayName", "")
-        g_key = "gemini" if "Gemini" in g_name else "claude_gpt"
-        g_info = {
-            "displayName": g_name,
-            "description": g.get("description", ""),
-            "buckets": {},
-        }
-        for b in g.get("buckets", []):
-            b_id = b.get("bucketId", "")
-            rem = b.get("remainingFraction", 1.0)
-            reset_time = b.get("resetTime")
-            reset_ts = None
-            if reset_time:
-                try:
-                    dt = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
-                    reset_ts = dt.timestamp()
-                except Exception:
-                    pass
-            g_info["buckets"][b_id] = {
-                "bucketId": b_id,
-                "displayName": b.get("displayName", ""),
-                "window": b.get("window", ""),
-                "remainingFraction": rem,
-                "remainingPct": round(rem * 100, 2),
-                "resetTime": reset_time,
-                "resetTs": reset_ts,
-                "disabled": b.get("disabled", False),
-                "description": b.get("description", ""),
+    res = {"available": True, "raw": summary_data or models_data or {}, "groups": {}, "models": []}
+
+    # 1. Parse aggregate quota groups if returned
+    if summary_data and isinstance(summary_data.get("groups"), list):
+        for g in summary_data.get("groups", []):
+            g_name = g.get("displayName", "")
+            g_key = "gemini" if "Gemini" in g_name else "claude_gpt"
+            g_info = {
+                "displayName": g_name,
+                "description": g.get("description", ""),
+                "buckets": {},
             }
-        res["groups"][g_key] = g_info
-    res["subscription"] = fetch_subscription(token_obj.get("access_token") or "")
+            for b in g.get("buckets", []):
+                b_id = b.get("bucketId", "")
+                rem = b.get("remainingFraction", 1.0)
+                reset_time = b.get("resetTime")
+                reset_ts = None
+                if reset_time:
+                    try:
+                        dt = datetime.fromisoformat(reset_time.replace("Z", "+00:00"))
+                        reset_ts = dt.timestamp()
+                    except Exception:
+                        pass
+                g_info["buckets"][b_id] = {
+                    "bucketId": b_id,
+                    "displayName": b.get("displayName", ""),
+                    "window": b.get("window", ""),
+                    "remainingFraction": rem,
+                    "remainingPct": round(rem * 100, 2),
+                    "resetTime": reset_time,
+                    "resetTs": reset_ts,
+                    "disabled": b.get("disabled", False),
+                    "description": b.get("description", ""),
+                }
+            res["groups"][g_key] = g_info
+
+    # 2. Parse granular per-model quotas
+    raw_models = (models_data or {}).get("models", {})
+    pname = profile_dir.name.lower()
+    is_5_5_account = pname in ("martin", "biif", "agy-3", "agy-5", "3", "5") or any("5-5" in k for k in raw_models)
+
+    # Defaults from aggregate groups if present
+    g_5h = res.get("groups", {}).get("gemini", {}).get("buckets", {}).get("gemini-5h", {})
+    def_g_rem = g_5h.get("remainingFraction", 1.0)
+    def_g_reset = g_5h.get("resetTime")
+
+    g_wk = res.get("groups", {}).get("gemini", {}).get("buckets", {}).get("gemini-weekly", {})
+    def_g_wk_rem = g_wk.get("remainingFraction", def_g_rem)
+    def_g_wk_reset = g_wk.get("resetTime")
+    def_g_wk_rts = g_wk.get("resetTs")
+    if def_g_wk_reset and not def_g_wk_rts:
+        try:
+            def_g_wk_rts = datetime.fromisoformat(def_g_wk_reset.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            pass
+
+    c_5h = res.get("groups", {}).get("claude_gpt", {}).get("buckets", {}).get("3p-5h", {})
+    c_wk = res.get("groups", {}).get("claude_gpt", {}).get("buckets", {}).get("3p-weekly", {})
+    is_c_depleted = bool(c_wk.get("disabled") or (c_wk.get("remainingFraction") is not None and c_wk.get("remainingFraction") <= 0.0))
+    def_c_rem = 0.0 if is_c_depleted else c_5h.get("remainingFraction", 1.0)
+    def_c_reset = c_5h.get("resetTime")
+
+    def_c_wk_rem = 0.0 if is_c_depleted else c_wk.get("remainingFraction", 1.0)
+    def_c_wk_reset = c_wk.get("resetTime")
+    def_c_wk_rts = c_wk.get("resetTs")
+    if def_c_wk_reset and not def_c_wk_rts:
+        try:
+            def_c_wk_rts = datetime.fromisoformat(def_c_wk_reset.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            pass
+
+    # Authoritative weekly reset defaults (shared by individual subscription tier)
+    default_wk_reset = def_c_wk_reset or def_g_wk_reset
+    default_wk_rts = def_c_wk_rts or def_g_wk_rts
+    if not default_wk_rts:
+        try:
+            next_mon = get_next_monday_utc(time.time())
+            default_wk_rts = next_mon
+            default_wk_reset = datetime.fromtimestamp(next_mon, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
+
+    def _extract_q(keys, def_rem=1.0, def_reset=None):
+        for k in keys:
+            m_item = raw_models.get(k)
+            if isinstance(m_item, dict) and m_item.get("quotaInfo"):
+                qi = m_item["quotaInfo"]
+                rem = qi.get("remainingFraction", def_rem)
+                rt = qi.get("resetTime", def_reset)
+                rts = None
+                if rt:
+                    try:
+                        rts = datetime.fromisoformat(rt.replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        pass
+                return rem, rt, rts
+        rts = None
+        if def_reset:
+            try:
+                rts = datetime.fromisoformat(def_reset.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                pass
+        return def_rem, def_reset, rts
+
+    model_list = []
+    if is_5_5_account:
+        # 1. Gemini 4 Argon: Only 7D (has5h: False, hasWeekly: True)
+        # Argon shares individual tier weekly limit; NEVER fall back to 5-hour Gemini models (like gemini-2.5-pro)
+        argon_def_rem = 0.0 if is_c_depleted else def_c_wk_rem
+        rem, rt, rts = _extract_q(
+            ["gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-low"],
+            argon_def_rem,
+            default_wk_reset,
+        )
+        if is_c_depleted:
+            rem = 0.0
+            rt = default_wk_reset
+            rts = default_wk_rts
+        elif rts and (rts - time.time() < 24 * 3600):
+            # If server returned a 5-hour window reset time for Argon, override with weekly tier reset
+            rt = default_wk_reset
+            rts = default_wk_rts
+
+        argon_pct = round(rem * 100, 1)
+        model_list.append({
+            "id": "gemini-4-argon",
+            "displayName": "Gemini 4 Argon",
+            "provider": "Google Gemini",
+            "providerCode": "gemini",
+            "sortOrder": 1,
+            "has5h": False,
+            "hasWeekly": True,
+            "remainingFraction": rem,
+            "remainingPct": argon_pct,
+            "resetTime": rt,
+            "resetTs": rts,
+            "remaining5hPct": None,
+            "reset5hTs": None,
+            "remainingWkPct": argon_pct,
+            "resetWkTs": rts,
+            "recommended": True,
+            "tagTitle": "New",
+            "tagDescription": "Gemini 4 Argon reasoning model",
+            "supportsThinking": True,
+        })
+        # 2. Gemini 3.8 Flash: 7D & 5H (has5h: True, hasWeekly: True)
+        flash_rem, flash_rt, flash_rts = _extract_q(
+            ["gemini-3.8-flash-tiered", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3-flash", "gemini-2.5-pro"],
+            def_g_rem,
+            def_g_reset,
+        )
+        flash_wk_rem = def_g_wk_rem
+        flash_wk_rts = def_g_wk_rts or default_wk_rts
+        model_list.append({
+            "id": "gemini-3.8-flash",
+            "displayName": "Gemini 3.8 Flash",
+            "provider": "Google Gemini",
+            "providerCode": "gemini",
+            "sortOrder": 2,
+            "has5h": True,
+            "hasWeekly": True,
+            "remainingFraction": flash_rem,
+            "remainingPct": round(flash_rem * 100, 1),
+            "resetTime": flash_rt,
+            "resetTs": flash_rts,
+            "remaining5hPct": round(flash_rem * 100, 1),
+            "reset5hTs": flash_rts,
+            "remainingWkPct": round(flash_wk_rem * 100, 1),
+            "resetWkTs": flash_wk_rts,
+            "recommended": False,
+            "tagTitle": None,
+            "tagDescription": "Gemini 3.8 Flash high efficiency model",
+            "supportsThinking": True,
+        })
+        # 3. Claude Models (Opus 5.5 / Sonnet 5.5): 7D & 5H (has5h: True, hasWeekly: True)
+        c_rem, c_rt, c_rts = _extract_q(
+            ["claude-opus-5-5-high", "claude-sonnet-5-5-high", "claude-opus-5-5-medium", "claude-sonnet-5-5-medium"],
+            def_c_rem,
+            def_c_reset,
+        )
+        if is_c_depleted:
+            c_rem = 0.0
+            c_rt = default_wk_reset
+            c_rts = default_wk_rts
+        model_list.append({
+            "id": "claude-models-5-5",
+            "displayName": "Claude Models (Opus 5.5 / Sonnet 5.5)",
+            "provider": "Anthropic Claude",
+            "providerCode": "anthropic",
+            "sortOrder": 3,
+            "has5h": True,
+            "hasWeekly": True,
+            "remainingFraction": c_rem,
+            "remainingPct": round(c_rem * 100, 1),
+            "resetTime": c_rt,
+            "resetTs": c_rts,
+            "remaining5hPct": round(c_rem * 100, 1),
+            "reset5hTs": c_rts,
+            "remainingWkPct": round(def_c_wk_rem * 100, 1),
+            "resetWkTs": def_c_wk_rts or default_wk_rts,
+            "recommended": True,
+            "tagTitle": "New",
+            "tagDescription": "Claude Models (Opus 5.5 / Sonnet 5.5)",
+            "supportsThinking": True,
+        })
+    else:
+        # Other accounts: Gemini 3.8 Flash, Claude Models (Opus 4.6 / Sonnet 4.6)
+        # 1. Gemini 3.8 Flash: 7D & 5H (has5h: True, hasWeekly: True)
+        flash_rem, flash_rt, flash_rts = _extract_q(
+            ["gemini-3.8-flash-tiered", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3-flash", "gemini-2.5-pro"],
+            def_g_rem,
+            def_g_reset,
+        )
+        flash_wk_rem = def_g_wk_rem
+        flash_wk_rts = def_g_wk_rts or default_wk_rts
+        model_list.append({
+            "id": "gemini-3.8-flash",
+            "displayName": "Gemini 3.8 Flash",
+            "provider": "Google Gemini",
+            "providerCode": "gemini",
+            "sortOrder": 1,
+            "has5h": True,
+            "hasWeekly": True,
+            "remainingFraction": flash_rem,
+            "remainingPct": round(flash_rem * 100, 1),
+            "resetTime": flash_rt,
+            "resetTs": flash_rts,
+            "remaining5hPct": round(flash_rem * 100, 1),
+            "reset5hTs": flash_rts,
+            "remainingWkPct": round(flash_wk_rem * 100, 1),
+            "resetWkTs": flash_wk_rts,
+            "recommended": True,
+            "tagTitle": None,
+            "tagDescription": "Gemini 3.8 Flash high efficiency model",
+            "supportsThinking": True,
+        })
+        # 2. Claude Models (Opus 4.6 / Sonnet 4.6): 7D & 5H (has5h: True, hasWeekly: True)
+        c_rem, c_rt, c_rts = _extract_q(
+            ["claude-opus-4-6-thinking", "claude-sonnet-4-6"],
+            def_c_rem,
+            def_c_reset,
+        )
+        if is_c_depleted:
+            c_rem = 0.0
+            c_rt = default_wk_reset
+            c_rts = default_wk_rts
+        model_list.append({
+            "id": "claude-models-4-6",
+            "displayName": "Claude Models (Opus 4.6 / Sonnet 4.6)",
+            "provider": "Anthropic Claude",
+            "providerCode": "anthropic",
+            "sortOrder": 2,
+            "has5h": True,
+            "hasWeekly": True,
+            "remainingFraction": c_rem,
+            "remainingPct": round(c_rem * 100, 1),
+            "resetTime": c_rt,
+            "resetTs": c_rts,
+            "remaining5hPct": round(c_rem * 100, 1),
+            "reset5hTs": c_rts,
+            "remainingWkPct": round(def_c_wk_rem * 100, 1),
+            "resetWkTs": def_c_wk_rts or default_wk_rts,
+            "recommended": False,
+            "tagTitle": "Thinking",
+            "tagDescription": "Claude Models (Opus 4.6 / Sonnet 4.6)",
+            "supportsThinking": True,
+        })
+
+    res["models"] = model_list
+
+    # 3. Synthesize 'gemini' group in res["groups"] if missing from retrieveUserQuotaSummary
+    if "gemini" not in res["groups"]:
+        gemini_models = [m for m in model_list if m["providerCode"] == "gemini"]
+        if gemini_models:
+            # Prefer 5H-enabled model (e.g. Gemini 3.8 Flash) for gemini-5h bucket
+            g_5h_rep = next((m for m in gemini_models if m.get("has5h")), gemini_models[0])
+            # Prefer standard Gemini model (e.g. Gemini 3.8 Flash) for gemini-weekly bucket
+            g_wk_rep = next((m for m in gemini_models if m.get("id") == "gemini-3.8-flash"), gemini_models[0])
+            res["groups"]["gemini"] = {
+                "displayName": "Gemini models",
+                "description": "Models within this group: Gemini 4 Argon, Gemini 3.8 Flash",
+                "buckets": {
+                    "gemini-5h": {
+                        "bucketId": "gemini-5h",
+                        "displayName": "Five Hour Limit Remaining",
+                        "window": "5h",
+                        "remainingFraction": g_5h_rep["remainingFraction"],
+                        "remainingPct": g_5h_rep["remainingPct"],
+                        "resetTime": g_5h_rep["resetTime"],
+                        "resetTs": g_5h_rep["resetTs"],
+                        "disabled": False,
+                        "description": "",
+                    },
+                    "gemini-weekly": {
+                        "bucketId": "gemini-weekly",
+                        "displayName": "Weekly Limit Remaining",
+                        "window": "weekly",
+                        "remainingFraction": (g_wk_rep.get("remainingWkPct", 100.0) / 100.0) if g_wk_rep.get("remainingWkPct") is not None else g_wk_rep["remainingFraction"],
+                        "remainingPct": g_wk_rep.get("remainingWkPct", g_wk_rep["remainingPct"]),
+                        "resetTime": g_wk_rep.get("resetTime"),
+                        "resetTs": g_wk_rep.get("resetWkTs", g_wk_rep.get("resetTs")),
+                        "disabled": False,
+                        "description": "",
+                    }
+                }
+            }
+
+    # 4. Synthesize 'claude_gpt' group if missing
+    if "claude_gpt" not in res["groups"]:
+        claude_models = [m for m in model_list if m["providerCode"] in ("anthropic", "openai")]
+        if claude_models:
+            c_rep = claude_models[0]
+            res["groups"]["claude_gpt"] = {
+                "displayName": "Claude and GPT models",
+                "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                "buckets": {
+                    "3p-5h": {
+                        "bucketId": "3p-5h",
+                        "displayName": "Five Hour Limit Remaining",
+                        "window": "5h",
+                        "remainingFraction": c_rep["remainingFraction"],
+                        "remainingPct": c_rep["remainingPct"],
+                        "resetTime": c_rep["resetTime"],
+                        "resetTs": c_rep["resetTs"],
+                        "disabled": False,
+                        "description": "",
+                    },
+                    "3p-weekly": {
+                        "bucketId": "3p-weekly",
+                        "displayName": "Weekly Limit Remaining",
+                        "window": "weekly",
+                        "remainingFraction": c_rep["remainingFraction"],
+                        "remainingPct": c_rep["remainingPct"],
+                        "resetTime": c_rep["resetTime"],
+                        "resetTs": c_rep["resetTs"],
+                        "disabled": False,
+                        "description": "",
+                    }
+                }
+            }
+
+    res["subscription"] = fetch_subscription(active_token or "")
     return res
 
 
@@ -412,9 +858,9 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
     window_5h_threshold = current_ts - (5 * 3600)
     window_7d_threshold = current_ts - (7 * 86400)
 
-    stats_5h = {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    stats_7d = {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-    stats_all = {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    stats_5h = {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0, "models": {}}
+    stats_7d = {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0, "models": {}}
+    stats_all = {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0, "models": {}}
     timestamps_5h = []
     timestamps_7d = []
 
@@ -422,7 +868,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
     daily_stats = {}
     for i in range(7):
         d_str = (datetime.fromtimestamp(current_ts) - timedelta(days=6 - i)).strftime("%Y-%m-%d")
-        daily_stats[d_str] = {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        daily_stats[d_str] = {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0, "models": {}}
 
     # Calendar Heatmap breakdown (Starting from 2026-09-01)
     start_dt = datetime(2026, 9, 1).date()
@@ -440,6 +886,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
             "thinking_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
+            "models": {},
         }
 
     conversations_list = []
@@ -455,10 +902,12 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
             convo_cached = 0
             convo_thinking = 0
             convo_output = 0
+            convo_models = {}
             convo_steps = []
 
             try:
                 conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=5.0)
+                get_model = extract_model_resolver(conn)
                 cur = conn.cursor()
                 cur.execute("SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC;")
                 for idx, raw_meta in cur.fetchall():
@@ -473,6 +922,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                     th_tok = usage.get("thinking_tokens", 0)
                     out_tok = usage.get("output_tokens", 0)
                     tot_tok = p_tok + c_tok + cached_tok
+                    m_family = get_model(idx)
 
                     convo_reqs += 1
                     convo_prompt += p_tok
@@ -480,6 +930,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                     convo_cached += cached_tok
                     convo_thinking += th_tok
                     convo_output += out_tok
+                    convo_models[m_family] = convo_models.get(m_family, 0) + tot_tok
 
                     dt_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "-"
                     d_key = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else ""
@@ -494,6 +945,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                         "thinking_tokens": th_tok,
                         "output_tokens": out_tok,
                         "total_tokens": tot_tok,
+                        "model": m_family,
                     }
                     convo_steps.append(step_info)
 
@@ -505,6 +957,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                     stats_all["thinking_tokens"] += th_tok
                     stats_all["output_tokens"] += out_tok
                     stats_all["total_tokens"] += tot_tok
+                    stats_all["models"][m_family] = stats_all["models"].get(m_family, 0) + tot_tok
 
                     # Accumulate Calendar Stats
                     if d_key in calendar_stats:
@@ -515,6 +968,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                         calendar_stats[d_key]["thinking_tokens"] += th_tok
                         calendar_stats[d_key]["output_tokens"] += out_tok
                         calendar_stats[d_key]["total_tokens"] += tot_tok
+                        calendar_stats[d_key]["models"][m_family] = calendar_stats[d_key]["models"].get(m_family, 0) + tot_tok
 
                     # Accumulate 7 Days
                     if ts >= window_7d_threshold:
@@ -525,6 +979,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                         stats_7d["thinking_tokens"] += th_tok
                         stats_7d["output_tokens"] += out_tok
                         stats_7d["total_tokens"] += tot_tok
+                        stats_7d["models"][m_family] = stats_7d["models"].get(m_family, 0) + tot_tok
                         timestamps_7d.append(ts)
                         if d_key in daily_stats:
                             daily_stats[d_key]["requests"] += 1
@@ -534,6 +989,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                             daily_stats[d_key]["thinking_tokens"] += th_tok
                             daily_stats[d_key]["output_tokens"] += out_tok
                             daily_stats[d_key]["total_tokens"] += tot_tok
+                            daily_stats[d_key]["models"][m_family] = daily_stats[d_key]["models"].get(m_family, 0) + tot_tok
 
                     # Accumulate 5 Hours
                     if ts >= window_5h_threshold:
@@ -544,6 +1000,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                         stats_5h["thinking_tokens"] += th_tok
                         stats_5h["output_tokens"] += out_tok
                         stats_5h["total_tokens"] += tot_tok
+                        stats_5h["models"][m_family] = stats_5h["models"].get(m_family, 0) + tot_tok
                         timestamps_5h.append(ts)
 
                 conn.close()
@@ -560,6 +1017,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
                         "thinking_tokens": convo_thinking,
                         "output_tokens": convo_output,
                         "total_tokens": convo_prompt + convo_candidate + convo_cached,
+                        "models": convo_models,
                         "steps": convo_steps[-20:]  # keep recent 20 steps for detail
                     })
 
@@ -830,6 +1288,7 @@ def get_profile_usage(profile: Dict[str, Any], current_ts: Optional[float] = Non
             "thinking_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
+            "models": {},
         }),
         "conversations": conversations_list,
     }
@@ -844,9 +1303,9 @@ def get_all_usage(manager) -> Dict[str, Any]:
 
     accounts_usage = []
     totals = {
-        "stats_5h": {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-        "stats_7d": {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-        "stats_all": {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "stats_5h": {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0, "models": {}},
+        "stats_7d": {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0, "models": {}},
+        "stats_all": {"requests": 0, "prompt_tokens": 0, "candidate_tokens": 0, "cached_tokens": 0, "thinking_tokens": 0, "output_tokens": 0, "total_tokens": 0, "models": {}},
         "usable_accounts": 0,
         "exhausted_accounts": 0,
     }
@@ -867,6 +1326,7 @@ def get_all_usage(manager) -> Dict[str, Any]:
             "thinking_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
+            "models": {},
         }
 
     for p in profiles:
@@ -881,13 +1341,17 @@ def get_all_usage(manager) -> Dict[str, Any]:
             totals["exhausted_accounts"] += 1
 
         for scope in ["stats_5h", "stats_7d", "stats_all"]:
-            for k in totals[scope]:
+            for k in ["requests", "prompt_tokens", "candidate_tokens", "cached_tokens", "thinking_tokens", "output_tokens", "total_tokens"]:
                 totals[scope][k] += u[scope].get(k, 0)
+            for m_k, m_v in u[scope].get("models", {}).items():
+                totals[scope]["models"][m_k] = totals[scope]["models"].get(m_k, 0) + m_v
 
         for d_str, d_stat in u.get("calendar_stats", {}).items():
             if d_str in totals_calendar:
                 for k in ["requests", "prompt_tokens", "candidate_tokens", "cached_tokens", "thinking_tokens", "output_tokens", "total_tokens"]:
                     totals_calendar[d_str][k] += d_stat.get(k, 0)
+                for m_k, m_v in d_stat.get("models", {}).items():
+                    totals_calendar[d_str]["models"][m_k] = totals_calendar[d_str]["models"].get(m_k, 0) + m_v
 
     today_str = datetime.fromtimestamp(current_ts).strftime("%Y-%m-%d")
     today_totals = totals_calendar.get(today_str, {
@@ -899,6 +1363,7 @@ def get_all_usage(manager) -> Dict[str, Any]:
         "thinking_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
+        "models": {},
     })
     totals["today"] = today_totals
 
@@ -1623,6 +2088,122 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       color: #ffffff;
       text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85), 0 0 3px rgba(0, 0, 0, 0.6);
       flex-shrink: 0;
+    }}
+
+    /* Granular Models Quota Section */
+    .models-container {{
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 0.875rem;
+    }}
+
+    .model-quota-block {{
+      background: rgba(255, 255, 255, 0.025);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      padding: 0.45rem 0.6rem;
+      transition: border-color 0.2s ease, background 0.2s ease;
+    }}
+
+    .model-quota-block:hover {{
+      border-color: rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.04);
+    }}
+
+    .model-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.35rem;
+      line-height: 1.2;
+    }}
+
+    .model-name-group {{
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      flex: 1;
+    }}
+
+    .model-icon {{
+      font-size: 0.8rem;
+      line-height: 1;
+      flex-shrink: 0;
+    }}
+
+    .model-name {{
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #f1f5f9;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      letter-spacing: -0.01em;
+    }}
+
+    .model-badge {{
+      font-size: 0.5625rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 1px 4px;
+      border-radius: 4px;
+      letter-spacing: 0.02em;
+      line-height: 1.1;
+      flex-shrink: 0;
+    }}
+
+    .model-badge.tag-new {{
+      background: rgba(56, 189, 248, 0.2);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }}
+
+    .model-badge.tag-notice {{
+      background: rgba(245, 158, 11, 0.2);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.35);
+    }}
+
+    .model-badge.tag-thinking {{
+      background: rgba(168, 85, 247, 0.2);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.35);
+    }}
+
+    .model-capsules {{
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }}
+
+    .model-capsules .capsule-meter {{
+      margin-bottom: 0;
+    }}
+
+    .model-capsules .capsule-track {{
+      height: 22px;
+      border-radius: 6px;
+    }}
+
+    .model-capsules .capsule-content {{
+      padding: 0 8px;
+    }}
+
+    .model-capsules .capsule-tag {{
+      font-size: 0.6875rem;
+      font-weight: 800;
+    }}
+
+    .model-capsules .capsule-center {{
+      font-size: 0.6875rem;
+      gap: 4px;
+    }}
+
+    .model-capsules .capsule-pct {{
+      font-size: 0.75rem;
+      font-weight: 800;
     }}
 
     /* Sparkline Bar Chart */
@@ -2648,6 +3229,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             <div style="display:flex;gap:0.35rem;align-items:center;flex-wrap:wrap">
               <div class="range-selector" id="dimension-selector">
                 <button class="range-btn active" id="btn-dim-total" onclick="setTrendDimension('total', this)">总计</button>
+                <button class="range-btn" id="btn-dim-models" onclick="setTrendDimension('models', this)">按模型</button>
                 <button class="range-btn" id="btn-dim-rw" onclick="setTrendDimension('breakdown', this)">读/写/缓存</button>
                 <button class="range-btn" id="btn-dim-thinking" onclick="setTrendDimension('thinking', this)">思考/输出</button>
               </div>
@@ -2775,8 +3357,10 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         scaleLog: "对数",
         trendTitle: "📈 Token 消耗走势曲线",
         dimTotal: "总计",
+        dimModels: "按模型",
         dimRW: "读/写/缓存",
         dimThinking: "思考/输出",
+        modelDist: "模型分布",
         dayMon: "一", dayWed: "三", dayFri: "五", daySun: "日",
         todayUsage: "🌟 今日消耗:",
         activeDays: "活跃天数:",
@@ -2823,8 +3407,11 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         relayAutoRefreshTitle: "自动刷新",
         relayAutoRefreshPaused: "已暂停",
         gModelsTitle: "♊ GEMINI MODELS (Flash, Pro)",
+        modelsTitle: "模型额度明细",
+        unitModels: "款",
+        tagThinking: "思考",
         label5h: "5H",
-        labelWeekly: "周",
+        labelWeekly: "7D",
         labelClaude: "Claude",
         officialQuota: "官方配额余量",
         limit5hRem: "5 小时配额余量",
@@ -2967,8 +3554,10 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         scaleLog: "Log",
         trendTitle: "📈 Token Trend",
         dimTotal: "Total",
+        dimModels: "By Model",
         dimRW: "Read/Write/Cache",
         dimThinking: "Thinking/Output",
+        modelDist: "By Model",
         dayMon: "M", dayWed: "W", dayFri: "F", daySun: "S",
         todayUsage: "🌟 Today:",
         activeDays: "Active:",
@@ -3015,8 +3604,11 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         relayAutoRefreshTitle: "Auto-refresh",
         relayAutoRefreshPaused: "Paused",
         gModelsTitle: "♊ GEMINI MODELS (Flash, Pro)",
+        modelsTitle: "Model Quotas",
+        unitModels: "models",
+        tagThinking: "Thinking",
         label5h: "5H",
-        labelWeekly: "Wk",
+        labelWeekly: "7D",
         labelClaude: "Claude",
         officialQuota: "Official Quota",
         limit5hRem: "5-Hour Limit Remaining",
@@ -3180,6 +3772,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       setEl('btn-scale-linear', t('scaleLinear'));
       setEl('btn-scale-log', t('scaleLog'));
       setEl('btn-dim-total', t('dimTotal'));
+      setEl('btn-dim-models', t('dimModels'));
       setEl('btn-dim-rw', t('dimRW'));
       setEl('btn-dim-thinking', t('dimThinking'));
 
@@ -3553,6 +4146,226 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           ? `<button class="btn-relay-card" onclick="openAccountRelay('${{acc.name}}')" title="${{t('accountRelayTip')}}">${{t('btnRelayAccount')}}</button>`
           : `<button class="btn-relay-card disabled" disabled title="${{relayDisabledReason}}">${{t('btnRelayAccount')}}</button>`;
 
+        let modelQuotasHtml = '';
+        let modelsToRender = (oq.models && oq.models.length > 0) ? oq.models.slice() : null;
+        if (!modelsToRender || modelsToRender.length === 0) {{
+          const is55 = (acc.id === 3 || acc.id === 5 || acc.name === 'martin' || acc.name === 'biif' || acc.name === 'agy-3' || acc.name === 'agy-5');
+          const defWkTs = (cWk && cWk.resetTs) ? cWk.resetTs : ((gWk && gWk.resetTs) ? gWk.resetTs : 0);
+          if (is55) {{
+            modelsToRender = [
+              {{
+                id: 'gemini-4-argon',
+                displayName: 'Gemini 4 Argon',
+                provider: 'Google Gemini',
+                providerCode: 'gemini',
+                sortOrder: 1,
+                has5h: false,
+                hasWeekly: true,
+                remainingWkPct: (isClaudeWkExhausted ? 0 : (gWk ? pctWkInt : 100)),
+                resetWkTs: defWkTs,
+                tagTitle: 'New',
+                supportsThinking: true
+              }},
+              {{
+                id: 'gemini-3.8-flash',
+                displayName: 'Gemini 3.8 Flash',
+                provider: 'Google Gemini',
+                providerCode: 'gemini',
+                sortOrder: 2,
+                has5h: true,
+                hasWeekly: true,
+                remainingWkPct: (gWk ? pctWkInt : 100),
+                resetWkTs: defWkTs,
+                remaining5hPct: (g5h ? pct5hInt : 100),
+                reset5hTs: (g5h ? g5h.resetTs : 0),
+                supportsThinking: true
+              }},
+              {{
+                id: 'claude-models-5-5',
+                displayName: 'Claude Models (Opus 5.5 / Sonnet 5.5)',
+                provider: 'Anthropic Claude',
+                providerCode: 'anthropic',
+                sortOrder: 3,
+                has5h: true,
+                hasWeekly: true,
+                remainingWkPct: (cWk ? pctClaudeWkInt : 0),
+                resetWkTs: (cWk ? cWk.resetTs : defWkTs),
+                remaining5hPct: (c5h ? pctClaude5hInt : 0),
+                reset5hTs: (c5h ? c5h.resetTs : 0),
+                tagTitle: 'New',
+                supportsThinking: true
+              }}
+            ];
+          }} else {{
+            modelsToRender = [
+              {{
+                id: 'gemini-3.8-flash',
+                displayName: 'Gemini 3.8 Flash',
+                provider: 'Google Gemini',
+                providerCode: 'gemini',
+                sortOrder: 1,
+                has5h: true,
+                hasWeekly: true,
+                remainingWkPct: (gWk ? pctWkInt : 100),
+                resetWkTs: defWkTs,
+                remaining5hPct: (g5h ? pct5hInt : 100),
+                reset5hTs: (g5h ? g5h.resetTs : 0),
+                supportsThinking: true
+              }},
+              {{
+                id: 'claude-models-4-6',
+                displayName: 'Claude Models (Opus 4.6 / Sonnet 4.6)',
+                provider: 'Anthropic Claude',
+                providerCode: 'anthropic',
+                sortOrder: 2,
+                has5h: true,
+                hasWeekly: true,
+                remainingWkPct: (cWk ? pctClaudeWkInt : 0),
+                resetWkTs: (cWk ? cWk.resetTs : defWkTs),
+                remaining5hPct: (c5h ? pctClaude5hInt : 0),
+                reset5hTs: (c5h ? c5h.resetTs : 0),
+                tagTitle: 'Thinking',
+                supportsThinking: true
+              }}
+            ];
+          }}
+        }}
+                providerCode: 'anthropic',
+                sortOrder: 2,
+                has5h: true,
+                hasWeekly: true,
+                remainingWkPct: (cWk ? pctClaudeWkInt : 0),
+                resetWkTs: (cWk ? cWk.resetTs : 0),
+                remaining5hPct: (c5h ? pctClaude5hInt : 0),
+                reset5hTs: (c5h ? c5h.resetTs : 0),
+                tagTitle: 'Thinking',
+                supportsThinking: true
+              }}
+            ];
+          }}
+        }}
+
+        // Strict display order: 1. Gemini 4 Argon, 2. Gemini 3.8 Flash, 3. Claude Models
+        modelsToRender.sort((a, b) => {{
+          const getOrder = (m) => {{
+            const id = (m.id || '').toLowerCase();
+            const dn = (m.displayName || '').toLowerCase();
+            if (id.includes('argon') || dn.includes('argon')) return 1;
+            if (id.includes('flash') || dn.includes('flash')) return 2;
+            if (id.includes('claude') || dn.includes('claude') || dn.includes('opus') || dn.includes('sonnet')) return 3;
+            return m.sortOrder || 99;
+          }};
+          return getOrder(a) - getOrder(b);
+        }});
+
+        const renderCapsule = (label, pctVal, rtsVal, isClaude5h, isWeeklyExhausted) => {{
+          const pctInt = Math.round(pctVal !== undefined && pctVal !== null ? pctVal : 100);
+          let fillClass = 'fill-green';
+          let trackClass = 'track-green';
+          if (isAccountDisabled) {{
+            fillClass = 'fill-disabled';
+            trackClass = 'track-disabled';
+          }} else if (isClaude5h && showClaude5hAsDisabled) {{
+            fillClass = 'fill-red';
+            trackClass = 'track-red';
+          }} else if (pctInt <= 10) {{
+            fillClass = 'fill-red';
+            trackClass = 'track-red';
+          }} else if (pctInt <= 25) {{
+            fillClass = 'fill-yellow';
+            trackClass = 'track-yellow';
+          }} else if (!oq.available) {{
+            fillClass = 'fill-disabled';
+            trackClass = 'track-disabled';
+          }}
+
+          let cdHtml = '';
+          if (isRegion) {{
+            cdHtml = `<span>${{t('statusRegion')}}</span>`;
+          }} else if (isNotAuth) {{
+            cdHtml = `<span>${{t('statusNotAuth')}}</span>`;
+          }} else if (isTokenExpired) {{
+            cdHtml = `<span>${{t('relayDisabledExpired')}}</span>`;
+          }} else if (isClaude5h && showClaude5hAsDisabled) {{
+            cdHtml = `<span>🚫</span> <span>${{t('disabledStatus')}}</span>`;
+          }} else if (pctInt <= 0 || isWeeklyExhausted) {{
+            cdHtml = `<span>⏳</span> <strong class="countdown-time mono" style="color:#fb7185" data-reset-ts="${{rtsVal || 0}}">...</strong>`;
+          }} else if (rtsVal && pctInt < 100) {{
+            cdHtml = `<span>⏳</span> <strong class="countdown-time mono" data-reset-ts="${{rtsVal}}">...</strong>`;
+          }} else {{
+            cdHtml = `<span style="color:${{oq.available ? '#10b981' : 'var(--text-muted)'}}">✓</span> <span>${{oq.available ? t('ready100Short') : t('needLogin')}}</span>`;
+          }}
+
+          const fillWidth = isAccountDisabled ? 0 : ((isClaude5h && showClaude5hAsDisabled) ? 0 : (isWeeklyExhausted ? 0 : (oq.available ? pctInt : 0)));
+          const pctDisplay = isAccountDisabled ? '-' : ((isClaude5h && showClaude5hAsDisabled) ? '0%' : (isWeeklyExhausted ? '0%' : (oq.available ? pctInt + '%' : '-')));
+          const title = `${{label}}: ${{isAccountDisabled ? '-' : (showClaude5hAsDisabled ? t('disabledStatus') : pctDisplay)}}${{rtsVal ? ' • ' + t('exactReleaseTime') + formatExactTime(rtsVal) : ''}}`;
+
+          return `
+            <div class="capsule-meter" title="${{title}}">
+              <div class="capsule-track ${{trackClass}}">
+                <div class="capsule-fill ${{fillClass}}" style="width: ${{fillWidth}}%"></div>
+                <div class="capsule-content">
+                  <span class="capsule-tag">${{label}}</span>
+                  <div class="capsule-center">${{cdHtml}}</div>
+                  <span class="capsule-pct mono">${{pctDisplay}}</span>
+                </div>
+              </div>
+            </div>
+          `;
+        }};
+
+        let blocksHtml = '';
+        modelsToRender.forEach(m => {{
+          const isClaude = (m.providerCode === 'anthropic' || (m.id && m.id.includes('claude')));
+          const isArgon = (m.id && m.id.includes('argon')) || (m.displayName && m.displayName.includes('Argon'));
+          const icon = isClaude ? '🟣' : '♊';
+          const titleColor = isClaude ? 'var(--accent-purple)' : 'var(--accent-blue)';
+
+          // Badges
+          const tagHtml = m.tagTitle ? `<span class="model-badge tag-${{m.tagTitle.toLowerCase()}}">${{m.tagTitle}}</span>` : '';
+          const thinkHtml = (m.supportsThinking && (!m.tagTitle || m.tagTitle.toLowerCase() !== 'thinking'))
+            ? `<span class="model-badge tag-thinking" title="Thinking">${{t('tagThinking') || '思考'}}</span>`
+            : '';
+
+          // 7D Quota is always rendered
+          const isArgon = (m.id && m.id.includes('argon')) || (m.displayName && m.displayName.includes('Argon'));
+          const wkPct = m.remainingWkPct !== undefined ? m.remainingWkPct : (isClaude ? (cWk ? pctClaudeWkInt : 100) : (isArgon ? (isClaudeWkExhausted ? 0 : 100) : pctWkInt));
+          const wkRts = m.resetWkTs || (isClaude ? (cWk ? cWk.resetTs : null) : (gWk ? gWk.resetTs : null)) || (m.has5h === false ? (m.resetTs || (cWk ? cWk.resetTs : null)) : null);
+          const isWkExhausted = isClaude ? isClaudeWkExhausted : (isArgon ? (isClaudeWkExhausted || wkPct <= 0) : (wkPct <= 0));
+
+          let capsulesHtml = renderCapsule(t('labelWeekly') || '7D', wkPct, wkRts, false, isWkExhausted);
+
+          // 5H is rendered for all models EXCEPT gemini 4 argon
+          const has5h = m.has5h !== false && !isArgon;
+          if (has5h) {{
+            const h5Pct = m.remaining5hPct !== undefined ? m.remaining5hPct : (isClaude ? (c5h ? pctClaude5hInt : 100) : pct5hInt);
+            const h5Rts = m.reset5hTs || (isClaude ? (c5h ? c5h.resetTs : null) : (g5h ? g5h.resetTs : null)) || m.resetTs;
+            capsulesHtml += renderCapsule(t('label5h') || '5H', h5Pct, h5Rts, isClaude, false);
+          }}
+
+          blocksHtml += `
+            <div class="model-quota-block">
+              <div class="model-header">
+                <div class="model-name-group">
+                  <span class="model-icon">${{icon}}</span>
+                  <span class="model-name" style="color:${{titleColor}}" title="${{m.displayName}}">${{m.displayName}}</span>
+                  ${{tagHtml}}
+                  ${{thinkHtml}}
+                </div>
+              </div>
+              <div class="model-capsules">
+                ${{capsulesHtml}}
+              </div>
+            </div>
+          `;
+        }});
+
+        modelQuotasHtml = `
+          <div class="models-container">
+            ${{blocksHtml}}
+          </div>
+        `;
+
         const card = document.createElement('div');
         card.className = `account-card ${{isExhausted ? 'card-exhausted' : ''}}`;
         card.innerHTML = `
@@ -3569,76 +4382,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             <span class="status-tag ${{badgeClass}}" title="${{usability.reason || ''}}">${{statusLabel}}</span>
           </div>` : ''}}
 
-          <!-- Official Quota: Gemini Models -->
-          <div class="metric-block">
-            <div style="font-size:0.75rem;font-weight:700;color:var(--accent-blue);margin-bottom:0.55rem;display:flex;align-items:center;justify-content:space-between">
-              <span>${{t('gModelsTitle')}}</span>
-            </div>
-
-            <!-- 1. Gemini Weekly Limit Remaining (WEEKLY FIRST) -->
-            <div class="capsule-meter" title="Gemini ${{t('labelWeekly')}}: ${{isAccountDisabled ? '-' : pctWkInt + '%'}}${{gWk && gWk.resetTs ? ' • ' + t('exactReleaseTime') + formatExactTime(gWk.resetTs) : ''}}">
-              <div class="capsule-track ${{trackWkClass}}">
-                <div class="capsule-fill ${{fillWkClass}}" style="width: ${{isAccountDisabled ? 0 : pctWkInt}}%"></div>
-                <div class="capsule-content">
-                  <span class="capsule-tag">${{t('labelWeekly')}}</span>
-                  <div class="capsule-center">
-                    ${{cdWkCapsuleHtml}}
-                  </div>
-                  <span class="capsule-pct mono">${{isAccountDisabled ? '-' : pctWkInt + '%'}}</span>
-                </div>
-              </div>
-            </div>
-
-            <!-- 2. Gemini 5H Limit Remaining (5H SECOND) -->
-            <div class="capsule-meter" title="Gemini 5H: ${{isAccountDisabled ? '-' : (show5hAsDisabled ? t('disabledStatus') : pct5hInt + '%')}}${{g5h && g5h.resetTs ? ' • ' + t('exactReleaseTime') + formatExactTime(g5h.resetTs) : ''}}">
-              <div class="capsule-track ${{track5hClass}}">
-                <div class="capsule-fill ${{fill5hClass}}" style="width: ${{isAccountDisabled ? 0 : (show5hAsDisabled ? 0 : pct5hInt)}}%"></div>
-                <div class="capsule-content">
-                  <span class="capsule-tag">${{t('label5h')}}</span>
-                  <div class="capsule-center">
-                    ${{cd5hCapsuleHtml}}
-                  </div>
-                  <span class="capsule-pct mono">${{isAccountDisabled ? '-' : (show5hAsDisabled ? '0%' : pct5hInt + '%')}}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Official Quota: Claude & GPT -->
-          <div class="metric-block">
-            <div style="font-size:0.75rem;font-weight:700;color:var(--accent-purple);margin-bottom:0.55rem;display:flex;align-items:center;justify-content:space-between">
-              <span>${{t('claudeTitle')}}</span>
-            </div>
-
-            <!-- 1. Claude & GPT Weekly Limit Remaining (WEEKLY FIRST) -->
-            <div class="capsule-meter" title="Claude & GPT ${{t('labelWeekly')}}: ${{isAccountDisabled ? '-' : (isClaudeWkExhausted ? '0%' : (cWk ? pctClaudeWkInt + '%' : (oq.available ? '100%' : '-')))}}${{cWk && cWk.resetTs ? ' • ' + t('exactReleaseTime') + formatExactTime(cWk.resetTs) : ''}}">
-              <div class="capsule-track ${{trackClaudeWkClass}}">
-                <div class="capsule-fill ${{fillClaudeWkClass}}" style="width: ${{isAccountDisabled ? 0 : (isClaudeWkExhausted ? 0 : (cWk ? pctClaudeWkInt : (oq.available ? 100 : 0)))}}%"></div>
-                <div class="capsule-content">
-                  <span class="capsule-tag">${{t('labelWeekly')}}</span>
-                  <div class="capsule-center">
-                    ${{cdClaudeWkCapsuleHtml}}
-                  </div>
-                  <span class="capsule-pct mono">${{isAccountDisabled ? '-' : (isClaudeWkExhausted ? '0%' : (cWk ? pctClaudeWkInt + '%' : (oq.available ? '100%' : '-')))}}</span>
-                </div>
-              </div>
-            </div>
-
-            <!-- 2. Claude & GPT 5H Limit Remaining (5H SECOND) -->
-            <div class="capsule-meter" title="Claude & GPT 5H: ${{isAccountDisabled ? '-' : (showClaude5hAsDisabled ? t('disabledStatus') : (c5h ? pctClaude5hInt + '%' : (oq.available ? '100%' : '-')))}}${{c5h && c5h.resetTs ? ' • ' + t('exactReleaseTime') + formatExactTime(c5h.resetTs) : ''}}">
-              <div class="capsule-track ${{trackClaude5hClass}}">
-                <div class="capsule-fill ${{fillClaude5hClass}}" style="width: ${{isAccountDisabled ? 0 : (showClaude5hAsDisabled ? 0 : (c5h ? pctClaude5hInt : (oq.available ? 100 : 0)))}}%"></div>
-                <div class="capsule-content">
-                  <span class="capsule-tag">${{t('label5h')}}</span>
-                  <div class="capsule-center">
-                    ${{cdClaude5hCapsuleHtml}}
-                  </div>
-                  <span class="capsule-pct mono">${{isAccountDisabled ? '-' : (showClaude5hAsDisabled ? '0%' : (c5h ? pctClaude5hInt + '%' : (oq.available ? '100%' : '-')))}}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
+          ${{modelQuotasHtml}}
 
           <!-- Local Token Stats Block -->
           <div class="metric-block">
@@ -3887,6 +4631,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
                      data-thinking="${{day.thinking_tokens}}"
                      data-output="${{day.output_tokens}}"
                      data-reqs="${{day.requests}}"
+                     data-models="${{encodeURIComponent(JSON.stringify(day.models || {{}}))}}"
                      data-istoday="${{isToday ? '1' : '0'}}"
                      onmouseenter="showHeatmapTooltip(event, this)"
                      onmousemove="moveHeatmapTooltip(event)"
@@ -3937,20 +4682,67 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       const avgTok = chartDays.length ? Math.round(totalTok / chartDays.length) : 0;
       const maxDay = chartDays.reduce((prev, curr) => (curr.total_tokens > prev.total_tokens ? curr : prev), {{ total_tokens: 0, date: '-' }});
 
+      const MODEL_COLORS = {{
+        'Gemini 4 Argon': '#38bdf8',
+        'Gemini 3.8 Flash': '#10b981',
+        'Claude Models': '#c084fc',
+        'Gemini Pro': '#f59e0b',
+        'GPT Models': '#06b6d4',
+        'Other': '#94a3b8'
+      }};
+
+      const activeModelsSet = new Set();
+      chartDays.forEach(d => {{
+        if (d.models) {{
+          Object.keys(d.models).forEach(m => {{
+            if (d.models[m] > 0) activeModelsSet.add(m);
+          }});
+        }}
+      }});
+      const canonicalOrder = ['Gemini 4 Argon', 'Gemini 3.8 Flash', 'Claude Models', 'Gemini Pro', 'GPT Models', 'Other'];
+      let activeModels = canonicalOrder.filter(m => activeModelsSet.has(m));
+      activeModelsSet.forEach(m => {{
+        if (!activeModels.includes(m)) activeModels.push(m);
+      }});
+      if (!activeModels.length) {{
+        activeModels = ['Gemini 3.8 Flash'];
+      }}
+
       // Update Trend Footer Stats
       const footer = document.getElementById('trend-stats-footer') || document.getElementById('trend-summary-chips');
       if (footer) {{
-        const todayPrompt = todayStat.prompt_tokens || 0;
-        const todayCached = todayStat.cached_tokens || 0;
-        const todayOut = (todayStat.candidate_tokens || 0) || ((todayStat.thinking_tokens || 0) + (todayStat.output_tokens || 0));
-        footer.innerHTML = `
-          <div class="metric-chip highlight-cyan">${{t('todayUsage')}} <strong>${{formatNumber(todayStat.total_tokens)}}</strong> <span class="chip-sub">(${{todayStat.requests}}${{t('unitTimes')}})</span></div>
-          <div class="metric-chip" style="border-color:rgba(56,189,248,0.35)">读 <strong>${{formatNumber(todayPrompt)}}</strong></div>
-          <div class="metric-chip" style="border-color:rgba(168,85,247,0.35)">缓存 <strong>${{formatNumber(todayCached)}}</strong></div>
-          <div class="metric-chip" style="border-color:rgba(52,211,153,0.35)">写 <strong>${{formatNumber(todayOut)}}</strong></div>
-          <div class="metric-chip">${{t('rangeTotal')}} <strong>${{formatNumber(totalTok)}}</strong></div>
-          <div class="metric-chip">${{t('dailyAvg')}} <strong>${{formatNumber(avgTok)}}</strong></div>
-        `;
+        if (currentTrendDimension === 'models') {{
+          let modelChips = `
+            <div class="metric-chip highlight-cyan">${{t('todayUsage')}} <strong>${{formatNumber(todayStat.total_tokens)}}</strong> <span class="chip-sub">(${{todayStat.requests}}${{t('unitTimes')}})</span></div>
+          `;
+          activeModels.forEach(m => {{
+            const col = MODEL_COLORS[m] || '#94a3b8';
+            const mTotal = chartDays.reduce((sum, d) => sum + ((d.models && d.models[m]) ? d.models[m] : 0), 0);
+            const mPct = totalTok > 0 ? Math.round((mTotal / totalTok) * 100) : 0;
+            modelChips += `
+              <div class="metric-chip" style="border-color:${{col}}55">
+                <span style="color:${{col}};margin-right:2px">●</span> ${{m}} <strong>${{formatNumber(mTotal)}}</strong> <span class="chip-sub">(${{mPct}}%)</span>
+              </div>
+            `;
+          }});
+          modelChips += `
+            <div class="metric-chip">${{t('rangeTotal')}} <strong>${{formatNumber(totalTok)}}</strong></div>
+            <div class="metric-chip">${{t('dailyAvg')}} <strong>${{formatNumber(avgTok)}}</strong></div>
+          `;
+          footer.innerHTML = modelChips;
+        }} else {{
+          const todayPrompt = todayStat.prompt_tokens || 0;
+          const todayCached = todayStat.cached_tokens || 0;
+          const todayOut = (todayStat.candidate_tokens || 0) || ((todayStat.thinking_tokens || 0) + (todayStat.output_tokens || 0));
+          footer.innerHTML = `
+            <div class="metric-chip highlight-cyan">${{t('todayUsage')}} <strong>${{formatNumber(todayStat.total_tokens)}}</strong> <span class="chip-sub">(${{todayStat.requests}}${{t('unitTimes')}})</span></div>
+            <div class="metric-chip" style="border-color:rgba(56,189,248,0.35)">读 <strong>${{formatNumber(todayPrompt)}}</strong></div>
+            <div class="metric-chip" style="border-color:rgba(168,85,247,0.35)">缓存 <strong>${{formatNumber(todayCached)}}</strong></div>
+            <div class="metric-chip" style="border-color:rgba(52,211,153,0.35)">写 <strong>${{formatNumber(todayOut)}}</strong></div>
+            <div class="metric-chip">${{t('rangeTotal')}} <strong>${{formatNumber(totalTok)}}</strong></div>
+            <div class="metric-chip">${{t('dailyAvg')}} <strong>${{formatNumber(avgTok)}}</strong></div>
+          `;
+        }}
       }}
 
       // Render SVG Chart
@@ -3969,6 +4761,8 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       let maxVal = 1000;
       if (currentTrendDimension === 'total') {{
         maxVal = Math.max(...chartDays.map(d => d.total_tokens || 0), 1000);
+      }} else if (currentTrendDimension === 'models') {{
+        maxVal = Math.max(...chartDays.map(d => Math.max(...Object.values(d.models || {{}}), d.total_tokens || 0, 0)), 1000);
       }} else if (currentTrendDimension === 'breakdown') {{
         maxVal = Math.max(...chartDays.map(d => Math.max(d.total_tokens || 0, d.prompt_tokens || 0, d.cached_tokens || 0, d.candidate_tokens || 0)), 1000);
       }} else {{
@@ -3998,7 +4792,11 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         const yCandidate = getY((d.candidate_tokens || 0) || ((d.thinking_tokens || 0) + (d.output_tokens || 0)));
         const yThinking = getY(d.thinking_tokens || 0);
         const yOutput = getY(d.output_tokens || 0);
-        return {{ x, yTotal, yPrompt, yCached, yCandidate, yThinking, yOutput, d }};
+        const yModels = {{}};
+        activeModels.forEach(m => {{
+          yModels[m] = getY((d.models && d.models[m]) ? d.models[m] : 0);
+        }});
+        return {{ x, yTotal, yPrompt, yCached, yCandidate, yThinking, yOutput, yModels, d }};
       }});
 
       window._trendPoints = points;
@@ -4022,6 +4820,19 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         return path;
       }}
 
+      function buildSmoothPathForModel(pts, modelName) {{
+        if (!pts || !pts.length) return '';
+        if (pts.length === 1) return `M ${{pts[0].x}} ${{pts[0].yModels[modelName]}}`;
+        let path = `M ${{pts[0].x}} ${{pts[0].yModels[modelName]}}`;
+        for (let i = 0; i < pts.length - 1; i++) {{
+          const p0 = pts[i];
+          const p1 = pts[i + 1];
+          const cpX = (p0.x + p1.x) / 2;
+          path += ` C ${{cpX}} ${{p0.yModels[modelName]}}, ${{cpX}} ${{p1.yModels[modelName]}}, ${{p1.x}} ${{p1.yModels[modelName]}}`;
+        }}
+        return path;
+      }}
+
       let linesSvg = '';
       let legendSvg = '';
 
@@ -4036,6 +4847,40 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           <g class="chart-legend" transform="translate(${{padL + 6}}, ${{padT - 6}})">
             <circle cx="4" cy="4" r="3.5" fill="#38bdf8"/>
             <text x="12" y="7" fill="#94a3b8" font-size="9" font-family="'JetBrains Mono', monospace">${{t('dimTotal')}} (Total)</text>
+          </g>
+        `;
+      }} else if (currentTrendDimension === 'models') {{
+        const pathTotal = buildSmoothPath(points, 'yTotal');
+        let modelPathsHtml = '';
+        activeModels.forEach(m => {{
+          const col = MODEL_COLORS[m] || '#94a3b8';
+          const pathM = buildSmoothPathForModel(points, m);
+          if (pathM) {{
+            modelPathsHtml += `<path d="${{pathM}}" fill="none" stroke="${{col}}" stroke-width="2.2" stroke-linecap="round" filter="url(#glow)"/>`;
+          }}
+        }});
+        linesSvg = `
+          ${{pathTotal ? `<path d="${{pathTotal}}" fill="none" stroke="#64748b" stroke-width="1.2" stroke-dasharray="3,3"/>` : ''}}
+          ${{modelPathsHtml}}
+        `;
+
+        let legendItems = '';
+        let curX = 4;
+        activeModels.forEach(m => {{
+          const col = MODEL_COLORS[m] || '#94a3b8';
+          legendItems += `
+            <circle cx="${{curX}}" cy="4" r="3" fill="${{col}}"/>
+            <text x="${{curX + 6}}" y="7" fill="${{col}}" font-size="8.5" font-family="'JetBrains Mono', monospace">${{m}}</text>
+          `;
+          curX += m.length * 6.0 + 16;
+        }});
+        legendItems += `
+          <line x1="${{curX}}" y1="4" x2="${{curX + 12}}" y2="4" stroke="#64748b" stroke-dasharray="2,2"/>
+          <text x="${{curX + 16}}" y="7" fill="#94a3b8" font-size="8.5" font-family="'JetBrains Mono', monospace">${{t('dimTotal') || '总计'}}</text>
+        `;
+        legendSvg = `
+          <g class="chart-legend" transform="translate(${{padL + 6}}, ${{padT - 6}})">
+            ${{legendItems}}
           </g>
         `;
       }} else if (currentTrendDimension === 'breakdown') {{
@@ -4122,6 +4967,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       points.forEach(p => {{
         const isToday = (p.d.date === todayDate);
         const hasData = (p.d.total_tokens > 0);
+        const mDataAttr = encodeURIComponent(JSON.stringify(p.d.models || {{}}));
         if (isToday) {{
           circlesSvg += `
             <circle cx="${{p.x}}" cy="${{p.yTotal}}" r="5" fill="#06b6d4" stroke="#ffffff" stroke-width="2" class="trend-point today-point"
@@ -4133,6 +4979,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
                     data-candidate="${{p.d.candidate_tokens || 0}}"
                     data-thinking="${{p.d.thinking_tokens}}"
                     data-output="${{p.d.output_tokens}}"
+                    data-models="${{mDataAttr}}"
                     data-istoday="1"
                     onmouseenter="showHeatmapTooltip(event, this)"
                     onmousemove="moveHeatmapTooltip(event)"
@@ -4156,6 +5003,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
                     data-candidate="${{p.d.candidate_tokens || 0}}"
                     data-thinking="${{p.d.thinking_tokens}}"
                     data-output="${{p.d.output_tokens}}"
+                    data-models="${{mDataAttr}}"
                     data-istoday="0"
                     onmouseenter="showHeatmapTooltip(event, this)"
                     onmousemove="moveHeatmapTooltip(event)"
@@ -4173,6 +5021,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
                     data-candidate="${{p.d.candidate_tokens || 0}}"
                     data-thinking="${{p.d.thinking_tokens}}"
                     data-output="${{p.d.output_tokens}}"
+                    data-models="${{mDataAttr}}"
                     data-istoday="0"
                     onmouseenter="showHeatmapTooltip(event, this)"
                     onmousemove="moveHeatmapTooltip(event)"
@@ -4272,6 +5121,50 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       const think = parseInt(el.getAttribute('data-thinking') || '0', 10);
       const out = parseInt(el.getAttribute('data-output') || '0', 10);
 
+      let modelsData = null;
+      try {{
+        const rawM = el.getAttribute('data-models');
+        if (rawM) {{
+          modelsData = JSON.parse(decodeURIComponent(rawM));
+        }}
+      }} catch (e) {{}}
+      if (!modelsData && window._trendPoints) {{
+        const ptMatch = window._trendPoints.find(p => p.d.date === d);
+        if (ptMatch && ptMatch.d && ptMatch.d.models) {{
+          modelsData = ptMatch.d.models;
+        }}
+      }}
+
+      let modelsHtml = '';
+      if (modelsData) {{
+        const mEntries = Object.entries(modelsData).filter(([_, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+        if (mEntries.length > 0) {{
+          modelsHtml += `<div style="margin-top:0.35rem;padding-top:0.25rem;border-top:1px solid rgba(255,255,255,0.08)">`;
+          modelsHtml += `<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:2px">${{t('modelDist') || '模型分布'}}:</div>`;
+          const mColors = {{
+            'Gemini 4 Argon': '#38bdf8',
+            'Gemini 3.8 Flash': '#10b981',
+            'Claude Models': '#c084fc',
+            'Gemini Pro': '#f59e0b',
+            'GPT Models': '#06b6d4',
+            'Other': '#94a3b8'
+          }};
+          mEntries.forEach(([mName, mVal]) => {{
+            const col = mColors[mName] || '#94a3b8';
+            const mPct = tok > 0 ? Math.round((mVal / tok) * 100) : 0;
+            modelsHtml += `
+              <div style="display:flex;justify-content:space-between;gap:1.2rem;margin-bottom:2px">
+                <span style="color:${{col}};display:flex;align-items:center;gap:4px">
+                  <span style="width:6px;height:6px;border-radius:50%;background:${{col}};display:inline-block"></span>${{mName}}:
+                </span>
+                <span><strong style="color:${{col}}">${{formatNumber(mVal)}}</strong> <span style="color:var(--text-muted);font-size:0.72rem">(${{mPct}}%)</span></span>
+              </div>
+            `;
+          }});
+          modelsHtml += `</div>`;
+        }}
+      }}
+
       tooltip.innerHTML = `
         <div style="font-weight:700;color:#fff;margin-bottom:0.35rem;border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:0.25rem">${{dateHeader}}</div>
         <div style="display:flex;justify-content:space-between;gap:1.2rem;margin-bottom:2px">
@@ -4302,6 +5195,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           <span style="color:var(--text-muted)">└ 纯输出 (Out):</span>
           <span>${{formatNumber(out)}}</span>
         </div>
+        ${{modelsHtml}}
       `;
       tooltip.style.display = 'block';
       moveHeatmapTooltip(event);
