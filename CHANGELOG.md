@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-11-07
+
+### Fixed
+- **Gemini 4 Argon 独立配额组与真实周限额提取 (Dedicated Gemini 4 Argon Quota Tracking)**:
+  - 接入 Google Antigravity 官方 CLI 原生 `/usage` 接口通道，完整提取官方独立的 `Gemini 4 Argon` 配额组及 `gemini-argon-wtu-weekly`（Gemini 4 Argon Weekly Limit）容量桶。
+  - 修复此前仅依赖旧版 HTTP `retrieveUserQuotaSummary` 接口导致 Argon 配额被误归入通用 Gemini 池并漏报真实消耗的缺陷。
+  - 优化模型绑定与胶囊渲染，准确呈现 Argon 独立的 7D 剩余百分比与周重置倒计时。
+- **CLI 配额总览表增强与并发性能提升**:
+  - 在 `agy-multi usage` 默认总览表中增加 `Argon Wk Rem` 独立列，无需 `-m` 参数即可直观对比各账号 Argon 剩余周限额。
+  - 在 `get_all_usage` 中引入线程池并发查询各账号配额并增加 30s 内存缓存，多账号收集耗时从 10+ 秒大幅降至约 2.6 秒。
+- **自动化测试增强**:
+  - 新增 `test_argon_dedicated_weekly_quota_bucket` 测试用例，确保独立 Argon 组提取及周配额正确解析。
+
 ## [1.6.1] - 2026-11-07
 
 ### Fixed

@@ -273,7 +273,7 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
     saved_dashboard = save_html_dashboard(manager)
 
     print(f"\n{BOLD}{CYAN}=== Antigravity Multi-Account Quota & Usage ==={RESET}\n")
-    headers = ["ID", "Name", "Usability", "Gemini 5H Rem", "Gemini Wk Rem", "Claude Wk Rem", "5H Tokens", "7D Tokens", "Active PIDs"]
+    headers = ["ID", "Name", "Usability", "Gemini 5H Rem", "Gemini Wk Rem", "Claude Wk Rem", "Argon Wk Rem", "5H Tokens", "7D Tokens", "Active PIDs"]
     rows = []
     for a in data["accounts"]:
         s5 = a["stats_5h"]
@@ -300,10 +300,12 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
         oq = a.get("official_quota", {})
         g_buckets = oq.get("groups", {}).get("gemini", {}).get("buckets", {})
         c_buckets = oq.get("groups", {}).get("claude_gpt", {}).get("buckets", {})
+        a_buckets = oq.get("groups", {}).get("argon", {}).get("buckets", {})
 
         g_5h = g_buckets.get("gemini-5h")
         g_wk = g_buckets.get("gemini-weekly")
         c_wk = c_buckets.get("3p-weekly")
+        a_wk = a_buckets.get("gemini-argon-wtu-weekly")
 
         is_g_wk_depleted = bucket_is_depleted(g_wk)
 
@@ -329,6 +331,7 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
         g_5h_str = fmt_rem(g_5h, is_disabled_by_parent=is_g_wk_depleted)
         g_wk_str = fmt_rem(g_wk)
         c_wk_str = fmt_rem(c_wk)
+        a_wk_str = fmt_rem(a_wk)
 
         rows.append([
             a["id"],
@@ -337,6 +340,7 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
             g_5h_str,
             g_wk_str,
             c_wk_str,
+            a_wk_str,
             f"{s5['total_tokens']:,}",
             f"{s7['total_tokens']:,}",
             pids

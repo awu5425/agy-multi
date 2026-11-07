@@ -599,8 +599,8 @@ def test_extract_model_resolver_and_token_curve_rendering(tmp_path):
 
 
 def test_argon_quota_extraction_and_weekly_exhaustion(tmp_path, monkeypatch):
-    """Verify that Gemini 4 Argon extracts true weekly quota, never leaks 5H quotas,
-    and correctly marks exhaustion when weekly quota is exhausted."""
+    """Verify that Gemini 4 Argon shares true Gemini quota (both 5H and weekly),
+    and correctly reflects Gemini quota consumption and weekly reset."""
     import json
     import io
     import urllib.request
@@ -692,13 +692,11 @@ def test_argon_quota_extraction_and_weekly_exhaustion(tmp_path, monkeypatch):
     assert "claude-models-5-5" in models
 
     argon = models["gemini-4-argon"]
-    assert argon["has5h"] is False
+    assert argon["has5h"] is True
     assert argon["hasWeekly"] is True
-    # Must NOT inherit 5h 94.1% or 4h reset time from gemini-2.5-pro
-    assert argon["remainingFraction"] == 0.0
-    assert argon["remainingPct"] == 0.0
-    assert argon["remainingWkPct"] == 0.0
-    assert argon["resetTime"] == "2026-11-05T17:01:17Z"
+    assert argon["remaining5hPct"] == 94.1
+    assert argon["remainingWkPct"] == 100.0
+    assert argon["resetTime"] == "2026-10-30T04:35:29Z"
 
     flash = models["gemini-3.8-flash"]
     assert flash["has5h"] is True
@@ -707,7 +705,11 @@ def test_argon_quota_extraction_and_weekly_exhaustion(tmp_path, monkeypatch):
     assert flash["remainingWkPct"] == 100.0
     assert flash["resetTime"] == "2026-10-30T04:35:29Z"
 
-    # Groups synthesis must NOT make gemini-5h 0% just because Argon is exhausted
+    # Claude 3P exhaustion must NOT exhaust Gemini models
+    claude = models["claude-models-5-5"]
+    assert claude["remainingWkPct"] == 0.0
+
+    # Groups synthesis properly creates gemini-5h
     g_5h = res["groups"]["gemini"]["buckets"]["gemini-5h"]
     assert g_5h["remainingPct"] == 94.1
 
@@ -822,6 +824,125 @@ def test_gemini_weekly_quota_detection(tmp_path, monkeypatch):
     assert flash_ex["remaining5hPct"] == 0.0
     assert res_ex["groups"]["gemini"]["buckets"]["gemini-weekly"]["disabled"] is True
     assert res_ex["groups"]["gemini"]["buckets"]["gemini-5h"]["disabled"] is True
+
+
+def test_argon_dedicated_weekly_quota_bucket(tmp_path, monkeypatch):
+    """
+    Ensure that when official quota groups contain the dedicated 'Gemini 4 Argon' group
+    and 'gemini-argon-wtu-weekly' bucket (e.g. 12.5% remaining on paid Pro plan),
+    it is correctly extracted into res['groups']['argon'] and model_list['gemini-4-argon'].
+    """
+    import json
+    import urllib.request
+    from agy_multi.usage import fetch_official_quota
+
+    pdir = tmp_path / "martin"
+    cli = pdir / ".gemini" / "antigravity-cli"
+    cli.mkdir(parents=True)
+    (cli / "antigravity-oauth-token").write_text(
+        json.dumps({
+            "token": {
+                "access_token": "ya29.test_token",
+                "refresh_token": "1//refresh",
+                "expiry": "2099-01-01T00:00:00Z",
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    class MockHTTPResponse:
+        def __init__(self, data_dict):
+            self._data = json.dumps(data_dict).encode("utf-8")
+        def read(self):
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    def mock_urlopen(req, *args, **kwargs):
+        url = req.full_url
+        if "retrieveUserQuotaSummary" in url:
+            return MockHTTPResponse({
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-weekly",
+                                "displayName": "Weekly Limit Remaining",
+                                "window": "weekly",
+                                "remainingFraction": 0.9942,
+                                "resetTime": "2026-11-14T01:19:31Z",
+                            },
+                            {
+                                "bucketId": "gemini-5h",
+                                "displayName": "Five Hour Limit Remaining",
+                                "window": "5h",
+                                "remainingFraction": 0.9946,
+                                "resetTime": "2026-11-07T13:58:44Z",
+                            }
+                        ]
+                    },
+                    {
+                        "displayName": "Claude and GPT models",
+                        "buckets": [
+                            {
+                                "bucketId": "3p-weekly",
+                                "displayName": "Weekly Limit Remaining",
+                                "window": "weekly",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-11-13T13:51:06Z",
+                            },
+                            {
+                                "bucketId": "3p-5h",
+                                "displayName": "Five Hour Limit Remaining",
+                                "window": "5h",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-11-07T17:44:29Z",
+                            }
+                        ]
+                    },
+                    {
+                        "displayName": "Gemini 4 Argon",
+                        "description": "For paid Pro plans, Argon quota is separate.",
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-argon-wtu-weekly",
+                                "displayName": "Gemini 4 Argon Weekly Limit",
+                                "window": "weekly",
+                                "remainingFraction": 0.1248,
+                                "resetTime": "2026-11-14T08:46:18Z",
+                            }
+                        ]
+                    }
+                ]
+            })
+        elif "fetchAvailableModels" in url:
+            return MockHTTPResponse({"models": {}})
+        return MockHTTPResponse({})
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    res = fetch_official_quota(pdir)
+    assert res["available"] is True
+    assert "argon" in res["groups"]
+    assert "gemini" in res["groups"]
+    assert "claude_gpt" in res["groups"]
+
+    argon_b = res["groups"]["argon"]["buckets"]["gemini-argon-wtu-weekly"]
+    assert argon_b["remainingPct"] == 12.48
+    assert argon_b["window"] == "weekly"
+
+    models = {m["id"]: m for m in res["models"]}
+    assert "gemini-4-argon" in models
+    argon = models["gemini-4-argon"]
+
+    assert argon["remainingWkPct"] == 12.5
+    assert argon["remaining5hPct"] == 99.5
+    assert argon["remainingPct"] == 12.5
+    assert argon["resetTime"] == "2026-11-14T08:46:18Z"
+
 
 
 

@@ -2,7 +2,7 @@
 agy-multi: Multi-account concurrent manager and runner for Antigravity (agy).
 """
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 import sys
 

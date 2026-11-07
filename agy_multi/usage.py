@@ -5,9 +5,13 @@ weekly usage, calendar heatmap) across all Antigravity profiles.
 """
 
 import os
+import sys
 import json
 import sqlite3
 import time
+import shutil
+import subprocess
+import concurrent.futures
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -272,7 +276,48 @@ _MISSING_OAUTH_CREDS_REASON = (
 )
 
 
-def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
+_QUOTA_CACHE: Dict[str, tuple[float, float, Dict[str, Any]]] = {}
+_QUOTA_CACHE_TTL = 30.0  # seconds
+
+
+def _fetch_via_cli(profile_dir: Path) -> Optional[Dict[str, Any]]:
+    """
+    Fetches real-time quota data directly via official `agy --output-format json -p "/usage"`.
+    Uses HOME set to profile_dir so official client connects to Antigravity services with proper context.
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules or os.environ.get("AGY_DISABLE_CLI_QUOTA"):
+        return None
+
+    agy_bin = shutil.which("agy")
+    if not agy_bin:
+        for cand in [Path.home() / ".local/bin/agy", Path("/home/agentuser/.local/bin/agy"), Path("/usr/local/bin/agy")]:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                agy_bin = str(cand)
+                break
+    if not agy_bin:
+        return None
+
+    try:
+        env = os.environ.copy()
+        env["HOME"] = str(profile_dir)
+        cp = subprocess.run(
+            [agy_bin, "--output-format", "json", "-p", "/usage"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if cp.returncode == 0 and cp.stdout:
+            out_obj = json.loads(cp.stdout)
+            data = out_obj.get("command", {}).get("data", {})
+            if isinstance(data.get("groups"), list) and data["groups"]:
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def fetch_official_quota(profile_dir: Path, use_cache: bool = True) -> Dict[str, Any]:
     """
     Fetches real-time official model quota from Google Antigravity prediction service:
     POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary
@@ -281,6 +326,17 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
     token_file = profile_dir / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
     if not token_file.is_file():
         return {"available": False, "reason": "未登录 (无 Token)"}
+
+    if "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules:
+        use_cache = False
+
+    cache_key = str(profile_dir.resolve())
+    token_mtime = token_file.stat().st_mtime if token_file.is_file() else 0.0
+    now = time.time()
+    if use_cache and cache_key in _QUOTA_CACHE:
+        cached_ts, cached_mtime, cached_val = _QUOTA_CACHE[cache_key]
+        if (now - cached_ts < _QUOTA_CACHE_TTL) and (token_mtime == cached_mtime):
+            return cached_val
 
     try:
         with open(token_file, "r", encoding="utf-8") as f:
@@ -374,7 +430,10 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
         return {"available": False, "reason": "无法获取配额数据 (无可用 Access Token)"}
 
     # Query both aggregate quota summary and available individual model quotas
-    summary_data = call_api(active_token, "retrieveUserQuotaSummary")
+    # Prefer official CLI output for full official fidelity (including dedicated Argon quota bucket)
+    summary_data = _fetch_via_cli(profile_dir)
+    if summary_data is None:
+        summary_data = call_api(active_token, "retrieveUserQuotaSummary")
     models_data = call_api(active_token, "fetchAvailableModels")
 
     if not summary_data and not models_data:
@@ -385,17 +444,23 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
     # 1. Parse aggregate quota groups if returned
     if summary_data and isinstance(summary_data.get("groups"), list):
         for g in summary_data.get("groups", []):
-            g_name = g.get("displayName", "")
-            g_key = "gemini" if "Gemini" in g_name else "claude_gpt"
+            g_name = g.get("displayName") or g.get("name", "")
+            g_name_lower = g_name.lower()
+            if "argon" in g_name_lower:
+                g_key = "argon"
+            elif "gemini" in g_name_lower:
+                g_key = "gemini"
+            else:
+                g_key = "claude_gpt"
             g_info = {
                 "displayName": g_name,
                 "description": g.get("description", ""),
                 "buckets": {},
             }
             for b in g.get("buckets", []):
-                b_id = b.get("bucketId", "")
-                rem = b.get("remainingFraction", 1.0)
-                reset_time = b.get("resetTime")
+                b_id = b.get("bucketId") or b.get("id", "")
+                rem = b.get("remainingFraction") if b.get("remainingFraction") is not None else b.get("remaining_fraction", 1.0)
+                reset_time = b.get("resetTime") or b.get("reset_time")
                 reset_ts = None
                 if reset_time:
                     try:
@@ -403,10 +468,12 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
                         reset_ts = dt.timestamp()
                     except Exception:
                         pass
+                b_disp = b.get("displayName") or b.get("name", "")
+                b_win = b.get("window", "")
                 g_info["buckets"][b_id] = {
                     "bucketId": b_id,
-                    "displayName": b.get("displayName", ""),
-                    "window": b.get("window", ""),
+                    "displayName": b_disp,
+                    "window": b_win,
                     "remainingFraction": rem,
                     "remainingPct": round(rem * 100, 2),
                     "resetTime": reset_time,
@@ -425,6 +492,7 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
     g_5h = res.get("groups", {}).get("gemini", {}).get("buckets", {}).get("gemini-5h", {})
     def_g_rem = g_5h.get("remainingFraction", 1.0)
     def_g_reset = g_5h.get("resetTime")
+    def_g_rts = g_5h.get("resetTs")
 
     g_wk = res.get("groups", {}).get("gemini", {}).get("buckets", {}).get("gemini-weekly", {})
     def_g_wk_rem = g_wk.get("remainingFraction", def_g_rem)
@@ -486,40 +554,84 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
 
     model_list = []
     if is_5_5_account:
-        # 1. Gemini 4 Argon: Only 7D (has5h: False, hasWeekly: True)
-        # Argon shares individual tier weekly limit; NEVER fall back to 5-hour Gemini models (like gemini-2.5-pro)
-        argon_def_rem = 0.0 if is_c_depleted else def_c_wk_rem
-        rem, rt, rts = _extract_q(
-            ["gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-low"],
-            argon_def_rem,
-            default_wk_reset,
-        )
-        if is_c_depleted:
-            rem = 0.0
-            rt = default_wk_reset
-            rts = default_wk_rts
-        elif rts and (rts - time.time() < 24 * 3600):
-            # If server returned a 5-hour window reset time for Argon, override with weekly tier reset
-            rt = default_wk_reset
-            rts = default_wk_rts
+        # 1. Gemini 4 Argon: 7D & 5H (has5h: True, hasWeekly: True)
+        # Dedicated quota group ("Gemini 4 Argon") with weekly limit bucket (gemini-argon-wtu-weekly)
+        # on Pro plans, or shares Gemini pool / granular model fallback.
+        argon_group = res.get("groups", {}).get("argon", {})
+        argon_buckets = argon_group.get("buckets", {})
+        argon_wtu_b = None
+        argon_5h_b = None
+        for b_id, b_val in argon_buckets.items():
+            b_id_l = b_id.lower()
+            win = b_val.get("window", "").lower()
+            if "weekly" in b_id_l or win == "weekly":
+                argon_wtu_b = b_val
+            elif "5h" in b_id_l or win == "5h":
+                argon_5h_b = b_val
 
-        argon_pct = round(rem * 100, 1)
+        raw_argon_rem, raw_argon_rt, raw_argon_rts = _extract_q(
+            ["gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-low",
+             "gemini-3.8-flash-tiered", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3-flash", "gemini-2.5-pro"],
+            def_g_rem,
+            def_g_reset,
+        )
+
+        if argon_wtu_b is not None:
+            argon_wk_rem = argon_wtu_b.get("remainingFraction", 1.0)
+            argon_wk_rt = argon_wtu_b.get("resetTime")
+            argon_wk_rts = argon_wtu_b.get("resetTs")
+            if argon_5h_b is not None:
+                argon_5h_rem = argon_5h_b.get("remainingFraction", 1.0)
+                argon_5h_rt = argon_5h_b.get("resetTime")
+                argon_5h_rts = argon_5h_b.get("resetTs")
+            else:
+                is_argon_wk_exhausted = bool(argon_wk_rem <= 0.01)
+                argon_5h_rem = 0.0 if is_argon_wk_exhausted else def_g_rem
+                argon_5h_rt = def_g_reset
+                argon_5h_rts = def_g_rts
+        elif raw_argon_rem is not None:
+            now_ts = time.time()
+            is_argon_weekly = bool(raw_argon_rts and (raw_argon_rts - now_ts > 5.5 * 3600))
+            if is_argon_weekly:
+                argon_wk_rem = raw_argon_rem
+                argon_wk_rt = raw_argon_rt
+                argon_wk_rts = raw_argon_rts
+                is_argon_wk_exhausted = bool(argon_wk_rem <= 0.01)
+                argon_5h_rem = 0.0 if is_argon_wk_exhausted else 1.0
+                argon_5h_rt = None
+                argon_5h_rts = None
+            else:
+                argon_5h_rem = raw_argon_rem
+                argon_5h_rt = raw_argon_rt
+                argon_5h_rts = raw_argon_rts
+                argon_wk_rem = def_g_wk_rem
+                argon_wk_rt = def_g_wk_reset or default_wk_reset
+                argon_wk_rts = def_g_wk_rts or default_wk_rts
+        else:
+            argon_5h_rem = def_g_rem
+            argon_5h_rt = def_g_reset
+            argon_5h_rts = def_g_rts
+            argon_wk_rem = def_g_wk_rem
+            argon_wk_rt = def_g_wk_reset or default_wk_reset
+            argon_wk_rts = def_g_wk_rts or default_wk_rts
+
         model_list.append({
             "id": "gemini-4-argon",
             "displayName": "Gemini 4 Argon",
             "provider": "Google Gemini",
             "providerCode": "gemini",
             "sortOrder": 1,
-            "has5h": False,
+            "has5h": True,
             "hasWeekly": True,
-            "remainingFraction": rem,
-            "remainingPct": argon_pct,
-            "resetTime": rt,
-            "resetTs": rts,
-            "remaining5hPct": None,
-            "reset5hTs": None,
-            "remainingWkPct": argon_pct,
-            "resetWkTs": rts,
+            "remainingFraction": min(argon_5h_rem, argon_wk_rem),
+            "remainingPct": round(min(argon_5h_rem, argon_wk_rem) * 100, 1),
+            "resetTime": argon_wk_rt if (argon_wk_rem < argon_5h_rem) else argon_5h_rt,
+            "resetTs": argon_wk_rts if (argon_wk_rem < argon_5h_rem) else argon_5h_rts,
+            "remaining5hPct": round(argon_5h_rem * 100, 1),
+            "reset5hTs": argon_5h_rts,
+            "remainingWkPct": round(argon_wk_rem * 100, 1),
+            "resetWkTs": argon_wk_rts,
+            "resetWkTime": argon_wk_rt,
             "recommended": True,
             "tagTitle": "New",
             "tagDescription": "Gemini 4 Argon reasoning model",
@@ -757,7 +869,34 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
                 }
             }
 
+    # 5. Synthesize 'argon' group if missing and an Argon model is present
+    if "argon" not in res["groups"]:
+        argon_models = [m for m in model_list if m.get("id") == "gemini-4-argon"]
+        if argon_models:
+            a_rep = argon_models[0]
+            res["groups"]["argon"] = {
+                "displayName": "Gemini 4 Argon",
+                "description": "For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.",
+                "buckets": {
+                    "gemini-argon-wtu-weekly": {
+                        "bucketId": "gemini-argon-wtu-weekly",
+                        "displayName": "Gemini 4 Argon Weekly Limit",
+                        "window": "weekly",
+                        "remainingFraction": (a_rep.get("remainingWkPct", 100.0) / 100.0) if a_rep.get("remainingWkPct") is not None else a_rep["remainingFraction"],
+                        "remainingPct": a_rep.get("remainingWkPct", a_rep["remainingPct"]),
+                        "resetTime": a_rep.get("resetWkTime") or a_rep.get("resetTime") or default_wk_reset,
+                        "resetTs": a_rep.get("resetWkTs", a_rep.get("resetTs")),
+                        "disabled": bool(a_rep.get("remainingWkPct", 100.0) <= 1.0),
+                        "description": "",
+                    }
+                }
+            }
+
     res["subscription"] = fetch_subscription(active_token or "")
+
+    if res.get("available") and use_cache:
+        _QUOTA_CACHE[cache_key] = (now, token_mtime, res)
+
     return res
 
 
@@ -1365,8 +1504,14 @@ def get_all_usage(manager) -> Dict[str, Any]:
             "models": {},
         }
 
-    for p in profiles:
-        u = get_profile_usage(p, current_ts, min_buffer_pct=min_buffer_pct)
+    if profiles:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(profiles))) as ex:
+            futs = [ex.submit(get_profile_usage, p, current_ts, min_buffer_pct) for p in profiles]
+            raw_usages = [f.result() for f in futs]
+    else:
+        raw_usages = []
+
+    for u in raw_usages:
         accounts_usage.append(u)
         if not u.get("show_on_dashboard", True):
             continue
@@ -4195,10 +4340,12 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
                 provider: 'Google Gemini',
                 providerCode: 'gemini',
                 sortOrder: 1,
-                has5h: false,
+                has5h: true,
                 hasWeekly: true,
-                remainingWkPct: (isClaudeWkExhausted ? 0 : (gWk ? pctWkInt : 100)),
+                remainingWkPct: (gWk ? pctWkInt : 100),
                 resetWkTs: defWkTs,
+                remaining5hPct: (g5h ? pct5hInt : 100),
+                reset5hTs: (g5h ? g5h.resetTs : 0),
                 tagTitle: 'New',
                 supportsThinking: true
               }},
@@ -4350,18 +4497,16 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             : '';
 
           // 7D Quota is always rendered
-          const wkPct = m.remainingWkPct !== undefined ? m.remainingWkPct : (isClaude ? (cWk ? pctClaudeWkInt : 100) : (isArgon ? (isClaudeWkExhausted ? 0 : 100) : pctWkInt));
-          const wkRts = m.resetWkTs || (isClaude ? (cWk ? cWk.resetTs : null) : (gWk ? gWk.resetTs : null)) || (m.has5h === false ? (m.resetTs || (cWk ? cWk.resetTs : null)) : null);
+          const wkPct = m.remainingWkPct !== undefined ? m.remainingWkPct : (isClaude ? (cWk ? pctClaudeWkInt : 100) : pctWkInt);
+          const wkRts = m.resetWkTs || (isClaude ? (cWk ? cWk.resetTs : null) : (gWk ? gWk.resetTs : null)) || (m.resetTs || (cWk ? cWk.resetTs : null));
           const isWkExhausted = isClaude
             ? isClaudeWkExhausted
-            : (isArgon
-              ? (isClaudeWkExhausted || wkPct <= 1)
-              : (wkPct <= 1));
+            : (wkPct <= 1);
 
           let capsulesHtml = renderCapsule(t('labelWeekly') || '7D', wkPct, wkRts, false, isWkExhausted);
 
-          // 5H is rendered for all models EXCEPT gemini 4 argon
-          const has5h = m.has5h !== false && !isArgon;
+          // 5H is rendered for all models with has5h !== false
+          const has5h = m.has5h !== false;
           if (has5h) {{
             const h5Pct = m.remaining5hPct !== undefined ? m.remaining5hPct : (isClaude ? (c5h ? pctClaude5hInt : 100) : pct5hInt);
             const nowSeconds = Date.now() / 1000;
