@@ -531,8 +531,25 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
             def_g_rem,
             def_g_reset,
         )
-        flash_wk_rem = def_g_wk_rem
-        flash_wk_rts = def_g_wk_rts or default_wk_rts
+        now_ts = time.time()
+        # If resetTime is > 5.5 hours away, server returned weekly limit tier quota, not 5h rolling limit
+        is_flash_weekly = bool(flash_rts and (flash_rts - now_ts > 5.5 * 3600))
+        if is_flash_weekly:
+            flash_wk_rem = flash_rem
+            flash_wk_rt = flash_rt
+            flash_wk_rts = flash_rts
+            is_flash_wk_exhausted = bool(flash_wk_rem <= 0.01)
+            flash_5h_rem = 0.0 if is_flash_wk_exhausted else 1.0
+            flash_5h_rt = None
+            flash_5h_rts = None
+        else:
+            flash_5h_rem = flash_rem
+            flash_5h_rt = flash_rt
+            flash_5h_rts = flash_rts
+            flash_wk_rem = def_g_wk_rem
+            flash_wk_rt = def_g_wk_reset or default_wk_reset
+            flash_wk_rts = def_g_wk_rts or default_wk_rts
+
         model_list.append({
             "id": "gemini-3.8-flash",
             "displayName": "Gemini 3.8 Flash",
@@ -541,14 +558,15 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
             "sortOrder": 2,
             "has5h": True,
             "hasWeekly": True,
-            "remainingFraction": flash_rem,
-            "remainingPct": round(flash_rem * 100, 1),
-            "resetTime": flash_rt,
-            "resetTs": flash_rts,
-            "remaining5hPct": round(flash_rem * 100, 1),
-            "reset5hTs": flash_rts,
+            "remainingFraction": flash_5h_rem if not is_flash_weekly else flash_wk_rem,
+            "remainingPct": round((flash_5h_rem if not is_flash_weekly else flash_wk_rem) * 100, 1),
+            "resetTime": flash_5h_rt or (flash_wk_rt if is_flash_weekly else None),
+            "resetTs": flash_5h_rts or (flash_wk_rts if is_flash_weekly else None),
+            "remaining5hPct": round(flash_5h_rem * 100, 1),
+            "reset5hTs": flash_5h_rts,
             "remainingWkPct": round(flash_wk_rem * 100, 1),
             "resetWkTs": flash_wk_rts,
+            "resetWkTime": flash_wk_rt,
             "recommended": False,
             "tagTitle": None,
             "tagDescription": "Gemini 3.8 Flash high efficiency model",
@@ -593,8 +611,25 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
             def_g_rem,
             def_g_reset,
         )
-        flash_wk_rem = def_g_wk_rem
-        flash_wk_rts = def_g_wk_rts or default_wk_rts
+        now_ts = time.time()
+        # If resetTime is > 5.5 hours away, server returned weekly limit tier quota, not 5h rolling limit
+        is_flash_weekly = bool(flash_rts and (flash_rts - now_ts > 5.5 * 3600))
+        if is_flash_weekly:
+            flash_wk_rem = flash_rem
+            flash_wk_rt = flash_rt
+            flash_wk_rts = flash_rts
+            is_flash_wk_exhausted = bool(flash_wk_rem <= 0.01)
+            flash_5h_rem = 0.0 if is_flash_wk_exhausted else 1.0
+            flash_5h_rt = None
+            flash_5h_rts = None
+        else:
+            flash_5h_rem = flash_rem
+            flash_5h_rt = flash_rt
+            flash_5h_rts = flash_rts
+            flash_wk_rem = def_g_wk_rem
+            flash_wk_rt = def_g_wk_reset or default_wk_reset
+            flash_wk_rts = def_g_wk_rts or default_wk_rts
+
         model_list.append({
             "id": "gemini-3.8-flash",
             "displayName": "Gemini 3.8 Flash",
@@ -603,14 +638,15 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
             "sortOrder": 1,
             "has5h": True,
             "hasWeekly": True,
-            "remainingFraction": flash_rem,
-            "remainingPct": round(flash_rem * 100, 1),
-            "resetTime": flash_rt,
-            "resetTs": flash_rts,
-            "remaining5hPct": round(flash_rem * 100, 1),
-            "reset5hTs": flash_rts,
+            "remainingFraction": flash_5h_rem if not is_flash_weekly else flash_wk_rem,
+            "remainingPct": round((flash_5h_rem if not is_flash_weekly else flash_wk_rem) * 100, 1),
+            "resetTime": flash_5h_rt or (flash_wk_rt if is_flash_weekly else None),
+            "resetTs": flash_5h_rts or (flash_wk_rts if is_flash_weekly else None),
+            "remaining5hPct": round(flash_5h_rem * 100, 1),
+            "reset5hTs": flash_5h_rts,
             "remainingWkPct": round(flash_wk_rem * 100, 1),
             "resetWkTs": flash_wk_rts,
+            "resetWkTime": flash_wk_rt,
             "recommended": True,
             "tagTitle": None,
             "tagDescription": "Gemini 3.8 Flash high efficiency model",
@@ -666,11 +702,11 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
                         "bucketId": "gemini-5h",
                         "displayName": "Five Hour Limit Remaining",
                         "window": "5h",
-                        "remainingFraction": g_5h_rep["remainingFraction"],
-                        "remainingPct": g_5h_rep["remainingPct"],
-                        "resetTime": g_5h_rep["resetTime"],
-                        "resetTs": g_5h_rep["resetTs"],
-                        "disabled": False,
+                        "remainingFraction": (g_5h_rep.get("remaining5hPct", 100.0) / 100.0) if g_5h_rep.get("remaining5hPct") is not None else g_5h_rep["remainingFraction"],
+                        "remainingPct": g_5h_rep.get("remaining5hPct", g_5h_rep["remainingPct"]),
+                        "resetTime": g_5h_rep.get("resetTime") if (g_5h_rep.get("resetTs") and g_5h_rep["resetTs"] - time.time() <= 5.5 * 3600) else None,
+                        "resetTs": g_5h_rep.get("reset5hTs"),
+                        "disabled": bool(g_wk_rep.get("remainingWkPct", 100.0) <= 1.0),
                         "description": "",
                     },
                     "gemini-weekly": {
@@ -679,9 +715,9 @@ def fetch_official_quota(profile_dir: Path) -> Dict[str, Any]:
                         "window": "weekly",
                         "remainingFraction": (g_wk_rep.get("remainingWkPct", 100.0) / 100.0) if g_wk_rep.get("remainingWkPct") is not None else g_wk_rep["remainingFraction"],
                         "remainingPct": g_wk_rep.get("remainingWkPct", g_wk_rep["remainingPct"]),
-                        "resetTime": g_wk_rep.get("resetTime"),
+                        "resetTime": g_wk_rep.get("resetWkTime") or default_wk_reset,
                         "resetTs": g_wk_rep.get("resetWkTs", g_wk_rep.get("resetTs")),
-                        "disabled": False,
+                        "disabled": bool(g_wk_rep.get("remainingWkPct", 100.0) <= 1.0),
                         "description": "",
                     }
                 }
@@ -4230,20 +4266,6 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             ];
           }}
         }}
-                providerCode: 'anthropic',
-                sortOrder: 2,
-                has5h: true,
-                hasWeekly: true,
-                remainingWkPct: (cWk ? pctClaudeWkInt : 0),
-                resetWkTs: (cWk ? cWk.resetTs : 0),
-                remaining5hPct: (c5h ? pctClaude5hInt : 0),
-                reset5hTs: (c5h ? c5h.resetTs : 0),
-                tagTitle: 'Thinking',
-                supportsThinking: true
-              }}
-            ];
-          }}
-        }}
 
         // Strict display order: 1. Gemini 4 Argon, 2. Gemini 3.8 Flash, 3. Claude Models
         modelsToRender.sort((a, b) => {{
@@ -4328,10 +4350,13 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             : '';
 
           // 7D Quota is always rendered
-          const isArgon = (m.id && m.id.includes('argon')) || (m.displayName && m.displayName.includes('Argon'));
           const wkPct = m.remainingWkPct !== undefined ? m.remainingWkPct : (isClaude ? (cWk ? pctClaudeWkInt : 100) : (isArgon ? (isClaudeWkExhausted ? 0 : 100) : pctWkInt));
           const wkRts = m.resetWkTs || (isClaude ? (cWk ? cWk.resetTs : null) : (gWk ? gWk.resetTs : null)) || (m.has5h === false ? (m.resetTs || (cWk ? cWk.resetTs : null)) : null);
-          const isWkExhausted = isClaude ? isClaudeWkExhausted : (isArgon ? (isClaudeWkExhausted || wkPct <= 0) : (wkPct <= 0));
+          const isWkExhausted = isClaude
+            ? isClaudeWkExhausted
+            : (isArgon
+              ? (isClaudeWkExhausted || wkPct <= 1)
+              : (wkPct <= 1));
 
           let capsulesHtml = renderCapsule(t('labelWeekly') || '7D', wkPct, wkRts, false, isWkExhausted);
 
@@ -4339,8 +4364,15 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           const has5h = m.has5h !== false && !isArgon;
           if (has5h) {{
             const h5Pct = m.remaining5hPct !== undefined ? m.remaining5hPct : (isClaude ? (c5h ? pctClaude5hInt : 100) : pct5hInt);
-            const h5Rts = m.reset5hTs || (isClaude ? (c5h ? c5h.resetTs : null) : (g5h ? g5h.resetTs : null)) || m.resetTs;
-            capsulesHtml += renderCapsule(t('label5h') || '5H', h5Pct, h5Rts, isClaude, false);
+            const nowSeconds = Date.now() / 1000;
+            const h5Rts = (m.reset5hTs !== undefined)
+              ? m.reset5hTs
+              : ((isClaude && c5h && c5h.resetTs)
+                ? c5h.resetTs
+                : ((!isClaude && g5h && g5h.resetTs && (g5h.resetTs - nowSeconds <= 5.5 * 3600))
+                  ? g5h.resetTs
+                  : ((m.resetTs && (m.resetTs - nowSeconds <= 5.5 * 3600)) ? m.resetTs : null)));
+            capsulesHtml += renderCapsule(t('label5h') || '5H', h5Pct, h5Rts, isClaude, isWkExhausted);
           }}
 
           blocksHtml += `
@@ -5890,18 +5922,23 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
 
 
     window.onload = async () => {{
-      // Immediately fetch fresh data from server to override embedded snapshot
+      // 1. Immediately render using embedded snapshot data so UI is instantly visible (0ms)
+      initDashboard();
+      updateCountdowns();
+      setInterval(updateCountdowns, 1000);
+      startAutoRefresh();
+
+      // 2. Background fetch fresh data to reconcile if newer
       try {{
         const resp = await fetch('/api/usage', {{ cache: 'no-store' }});
         if (resp.ok) {{
           const freshData = await resp.json();
           Object.assign(data, freshData);
+          updateStaticTexts();
+          initDashboard();
+          updateCountdowns();
         }}
-      }} catch(e) {{ /* fallback to embedded snapshot data if server unreachable */ }}
-      initDashboard();
-      updateCountdowns();
-      setInterval(updateCountdowns, 1000);
-      startAutoRefresh();
+      }} catch(e) {{ /* fallback to embedded snapshot data */ }}
     }};
   </script>
 

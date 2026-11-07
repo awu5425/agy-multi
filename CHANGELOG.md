@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-07
+
+### Fixed
+- **Gemini 模型周配额 (Weekly Quota) 识别修复**:
+  - 修复官方配额接口返回多日重置时间（如 > 5.5 小时的周限额 Tier 额度）时被错误归入 5H 滚动配额的问题；准确归属到 7D 周额度柱，并保持 5H 额度处于正常容量。
+  - 当周配额耗尽（<= 1%）时，联动将 5H 配额与相关组别置为禁用，防止无效调度。
+- **Dashboard 服务异常连接平滑处理**:
+  - 在 `server.py` 的 HTTP 响应流中安全捕获客户端提前断开导致的 `BrokenPipeError` 和 `ConnectionResetError`，避免控制台异常日志刷屏。
+- **自动化测试增强**:
+  - 新增 `test_gemini_weekly_quota_detection` 单测，覆盖周配额正常识别及周配额耗尽等边界场景。
+  - 在仪表盘前端渲染测试中引入 JavaScript 语法校验（node `--check`），保证嵌入脚本语法安全无误。
+
 ## [1.6.0] - 2026-10-30
 
 ### Added

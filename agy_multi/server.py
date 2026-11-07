@@ -330,8 +330,13 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except Exception:
-                self.send_error(500, "Error generating dashboard")
+                try:
+                    self.send_error(500, "Error generating dashboard")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
         elif self.path.startswith("/api/usage"):
             try:
@@ -346,8 +351,13 @@ class UsageDashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(encoded)))
                 self.end_headers()
                 self.wfile.write(encoded)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except Exception:
-                self.send_error(500, "Error fetching usage data")
+                try:
+                    self.send_error(500, "Error fetching usage data")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
         elif self.path.startswith("/api/relay/candidates"):
             try:

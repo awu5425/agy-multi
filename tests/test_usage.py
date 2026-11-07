@@ -64,6 +64,26 @@ def test_render_html_dashboard():
     assert "relay-beam-track" in html
     assert "relay-beam-spark" in html
 
+    # Validate JavaScript syntax in the generated HTML dashboard
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+    assert len(scripts) >= 1, "Dashboard must contain at least one <script> block"
+    node_bin = shutil.which("node")
+    if node_bin:
+        for idx, script_content in enumerate(scripts):
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as tf:
+                tf.write(script_content)
+                tf_path = tf.name
+            try:
+                res = subprocess.run([node_bin, "--check", tf_path], capture_output=True, text=True)
+                assert res.returncode == 0, f"Script block {idx} syntax error:\n{res.stderr}"
+            finally:
+                Path(tf_path).unlink(missing_ok=True)
+
 
 
 def test_parse_step_metadata_with_cached_tokens():
@@ -690,6 +710,119 @@ def test_argon_quota_extraction_and_weekly_exhaustion(tmp_path, monkeypatch):
     # Groups synthesis must NOT make gemini-5h 0% just because Argon is exhausted
     g_5h = res["groups"]["gemini"]["buckets"]["gemini-5h"]
     assert g_5h["remainingPct"] == 94.1
+
+
+def test_gemini_weekly_quota_detection(tmp_path, monkeypatch):
+    """
+    Ensure that when Google returns a multi-day reset time for Gemini models (e.g. weekly tier limit),
+    the quota is attributed to weekly (7D) rather than misattributed as 5H with a multi-day countdown.
+    """
+    import json
+    import time
+    from datetime import datetime, timezone, timedelta
+    import urllib.request
+    from agy_multi.usage import fetch_official_quota
+
+    pdir = tmp_path / "martin_weekly"
+    cli = pdir / ".gemini" / "antigravity-cli"
+    cli.mkdir(parents=True)
+    (cli / "antigravity-oauth-token").write_text(
+        json.dumps({
+            "token": {
+                "access_token": "ya29.test_token",
+                "refresh_token": "1//refresh",
+                "expiry": "2099-01-01T00:00:00Z",
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    now = time.time()
+    weekly_reset_dt = datetime.fromtimestamp(now + 2.5 * 86400, tz=timezone.utc)
+    weekly_reset_str = weekly_reset_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    class MockHTTPResponse:
+        def __init__(self, data_dict):
+            self._data = json.dumps(data_dict).encode("utf-8")
+        def read(self):
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    def mock_urlopen(req, *args, **kwargs):
+        url = req.full_url
+        if "retrieveUserQuotaSummary" in url:
+            return MockHTTPResponse({"groups": []})
+        elif "fetchAvailableModels" in url:
+            return MockHTTPResponse({
+                "models": {
+                    "gemini-3.8-flash-tiered": {
+                        "displayName": "Gemini 3.8 Flash",
+                        "quotaInfo": {
+                            "remainingFraction": 0.0696,
+                            "resetTime": weekly_reset_str,
+                        }
+                    }
+                }
+            })
+        return MockHTTPResponse({})
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    res = fetch_official_quota(pdir)
+    assert res["available"] is True
+    models = {m["id"]: m for m in res["models"]}
+    assert "gemini-3.8-flash" in models
+    flash = models["gemini-3.8-flash"]
+
+    # 7D / Weekly must receive the 7.0% quota and the weekly reset
+    assert flash["remainingWkPct"] == 7.0
+    assert flash["resetWkTs"] is not None
+    # 5H must NOT have a multi-day reset timestamp and reflects 100% capacity (not in cooldown)
+    assert flash["reset5hTs"] is None
+    assert flash["remaining5hPct"] == 100.0
+
+    # Synthesized gemini group
+    g_wk = res["groups"]["gemini"]["buckets"]["gemini-weekly"]
+    assert g_wk["remainingPct"] == 7.0
+    assert g_wk["resetTs"] is not None
+    assert g_wk["disabled"] is False
+
+    g_5h = res["groups"]["gemini"]["buckets"]["gemini-5h"]
+    assert g_5h["remainingPct"] == 100.0
+    assert g_5h["resetTs"] is None
+    assert g_5h["disabled"] is False
+
+    # Also test complete weekly exhaustion (<= 1%)
+    def mock_urlopen_exhausted(req, *args, **kwargs):
+        url = req.full_url
+        if "retrieveUserQuotaSummary" in url:
+            return MockHTTPResponse({"groups": []})
+        elif "fetchAvailableModels" in url:
+            return MockHTTPResponse({
+                "models": {
+                    "gemini-3.8-flash-tiered": {
+                        "displayName": "Gemini 3.8 Flash",
+                        "quotaInfo": {
+                            "remainingFraction": 0.0,
+                            "resetTime": weekly_reset_str,
+                        }
+                    }
+                }
+            })
+        return MockHTTPResponse({})
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen_exhausted)
+    res_ex = fetch_official_quota(pdir)
+    models_ex = {m["id"]: m for m in res_ex["models"]}
+    flash_ex = models_ex["gemini-3.8-flash"]
+    assert flash_ex["remainingWkPct"] == 0.0
+    assert flash_ex["remaining5hPct"] == 0.0
+    assert res_ex["groups"]["gemini"]["buckets"]["gemini-weekly"]["disabled"] is True
+    assert res_ex["groups"]["gemini"]["buckets"]["gemini-5h"]["disabled"] is True
+
 
 
 
