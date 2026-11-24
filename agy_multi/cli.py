@@ -13,7 +13,7 @@ import subprocess
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .manager import ProfileManager
 from .utils import (
@@ -273,7 +273,14 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
     saved_dashboard = save_html_dashboard(manager)
 
     print(f"\n{BOLD}{CYAN}=== Antigravity Multi-Account Quota & Usage ==={RESET}\n")
-    headers = ["ID", "Name", "Usability", "Gemini 5H Rem", "Gemini Wk Rem", "Claude Wk Rem", "Argon Wk Rem", "5H Tokens", "7D Tokens", "Active PIDs"]
+    has_any_argon = any(
+        a.get("official_quota", {}).get("groups", {}).get("argon", {}).get("buckets", {}).get("gemini-argon-wtu-weekly")
+        for a in data["accounts"]
+    )
+    headers = ["ID", "Name", "Usability", "Gemini 5H Rem", "Gemini Wk Rem", "Claude Wk Rem"]
+    if has_any_argon:
+        headers.append("Argon Wk Rem")
+    headers.extend(["5H Tokens", "7D Tokens", "Active PIDs"])
     rows = []
     for a in data["accounts"]:
         s5 = a["stats_5h"]
@@ -333,18 +340,22 @@ def cmd_usage(manager: ProfileManager, args: argparse.Namespace) -> int:
         c_wk_str = fmt_rem(c_wk)
         a_wk_str = fmt_rem(a_wk)
 
-        rows.append([
+        row = [
             a["id"],
             a["name"],
             usability_str,
             g_5h_str,
             g_wk_str,
             c_wk_str,
-            a_wk_str,
+        ]
+        if has_any_argon:
+            row.append(a_wk_str)
+        row.extend([
             f"{s5['total_tokens']:,}",
             f"{s7['total_tokens']:,}",
-            pids
+            pids,
         ])
+        rows.append(row)
     print(format_table(rows, headers))
 
     if getattr(args, "models", False):
@@ -908,6 +919,25 @@ def cmd_login(manager: ProfileManager, args: argparse.Namespace) -> int:
     return 0 if success else 1
 
 
+def _iter_profile_shortcut_suffixes(profile: Dict[str, Any]) -> List[str]:
+    """Return deduplicated, safe shortcut suffixes (ID and name) for a profile."""
+    suffixes: List[str] = []
+    seen = set()
+    for raw in (profile.get("id"), profile.get("name")):
+        suffix = str(raw or "").strip()
+        if not suffix or suffix in seen:
+            continue
+        if suffix in ("multi", "auto") or "/" in suffix or "\\" in suffix:
+            continue
+        seen.add(suffix)
+        suffixes.append(suffix)
+    return suffixes
+
+
+def _format_profile_shortcuts(profile: Dict[str, Any]) -> List[str]:
+    return [f"agy-{suffix}" for suffix in _iter_profile_shortcut_suffixes(profile)]
+
+
 def cmd_add(manager: ProfileManager, args: argparse.Namespace) -> int:
     try:
         inherit_from = None
@@ -929,10 +959,14 @@ def cmd_add(manager: ProfileManager, args: argparse.Namespace) -> int:
             inherit_hooks=not getattr(args, "no_hooks", False),
             copy_mode=getattr(args, "copy", False),
         )
+        cmd_install_helpers(manager, args, quiet=True)
         print(f"{GREEN}✓ Profile added successfully!{RESET}")
         print(f"  ID: {BOLD}{new_p['id']}{RESET}")
         print(f"  Name: {BOLD}{new_p['name']}{RESET}")
         print(f"  Email: {BOLD}{new_p['email']}{RESET}")
+        shortcuts = _format_profile_shortcuts(new_p)
+        if shortcuts:
+            print(f"  Shortcuts: {CYAN}{', '.join(shortcuts)}{RESET}")
         if inherit_from:
             report = new_p.get("inheritance_report", {})
             skills_mark = f"{GREEN}✓{RESET}" if report.get("skills_inherited") else f"{YELLOW}none{RESET}"
@@ -964,10 +998,14 @@ def cmd_clone(manager: ProfileManager, args: argparse.Namespace) -> int:
             inherit_hooks=not getattr(args, "no_hooks", False),
             copy_mode=not getattr(args, "link", False),
         )
+        cmd_install_helpers(manager, args, quiet=True)
         print(f"{GREEN}✓ Profile cloned successfully from '{args.source}'!{RESET}")
         print(f"  ID: {BOLD}{new_p['id']}{RESET}")
         print(f"  Name: {BOLD}{new_p['name']}{RESET}")
         print(f"  Email: {BOLD}{new_p['email']}{RESET}")
+        shortcuts = _format_profile_shortcuts(new_p)
+        if shortcuts:
+            print(f"  Shortcuts: {CYAN}{', '.join(shortcuts)}{RESET}")
         report = new_p.get("inheritance_report", {})
         skills_mark = f"{GREEN}✓{RESET}" if report.get("skills_inherited") else f"{YELLOW}none{RESET}"
         mcp_mark = f"{GREEN}✓{RESET}" if report.get("mcp_inherited") else f"{YELLOW}none{RESET}"
@@ -1044,7 +1082,7 @@ def cmd_edit(manager: ProfileManager, args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_install_helpers(manager: ProfileManager, args: argparse.Namespace) -> int:
+def cmd_install_helpers(manager: ProfileManager, args: argparse.Namespace, quiet: bool = False) -> int:
     """Installs agy-multi and shortcut scripts to ~/.local/bin/"""
     local_bin = manager.real_home / ".local" / "bin"
     local_bin.mkdir(parents=True, exist_ok=True)
@@ -1055,7 +1093,7 @@ def cmd_install_helpers(manager: ProfileManager, args: argparse.Namespace) -> in
             try:
                 with open(f, "r", encoding="utf-8") as s:
                     content = s.read()
-                    if "agy-multi" in content or "gemini-switch" in content:
+                    if "agy-multi" in content or "gemini-switch" in content or "agy_multi.cli" in content:
                         f.unlink()
             except Exception:
                 pass
@@ -1065,14 +1103,15 @@ def cmd_install_helpers(manager: ProfileManager, args: argparse.Namespace) -> in
     if legacy_bin.exists():
         try:
             legacy_bin.unlink()
-            print(f"{GREEN}✓ Removed deprecated command: {legacy_bin}{RESET}")
+            if not quiet:
+                print(f"{GREEN}✓ Removed deprecated command: {legacy_bin}{RESET}")
         except Exception:
             pass
 
     # 1. Install main agy-multi binary wrapper
     main_bin = local_bin / "agy-multi"
     package_dir = Path(__file__).resolve().parent.parent
-    
+
     script_content = f"""#!/usr/bin/env bash
 if [ -f "$HOME/.config/agy-multi/env" ]; then
     set -a
@@ -1084,7 +1123,8 @@ PYTHONPATH="{package_dir}:$PYTHONPATH" python3 -m agy_multi.cli "$@"
     with open(main_bin, "w", encoding="utf-8") as f:
         f.write(script_content)
     main_bin.chmod(0o755)
-    print(f"{GREEN}✓ Installed: {main_bin}{RESET}")
+    if not quiet:
+        print(f"{GREEN}✓ Installed: {main_bin}{RESET}")
 
     # 2. Install agy-auto (auto-picks best idle profile, runs with watchdog)
     shortcut_auto = local_bin / "agy-auto"
@@ -1093,52 +1133,45 @@ PYTHONPATH="{package_dir}:$PYTHONPATH" python3 -m agy_multi.cli "$@"
 exec "{main_bin}" run "$@"
 """)
     shortcut_auto.chmod(0o755)
-    print(f"{GREEN}✓ Installed shortcut: {shortcut_auto} (Auto-selects best idle profile & relay watchdog){RESET}")
+    if not quiet:
+        print(f"{GREEN}✓ Installed shortcut: {shortcut_auto} (Auto-selects best idle profile & relay watchdog){RESET}")
 
-    # 3. Install shortcuts for each profile (e.g. agy-1, agy-2, agy-work, etc.)
+    # 3. Install shortcuts for each profile (e.g. agy-1, agy-2, ..., agy-100, agy-work)
     profiles = manager.list_profiles()
     for p in profiles:
-        # ID-based shortcut (agy-1, agy-2)
-        shortcut_id = local_bin / f"agy-{p['id']}"
-        with open(shortcut_id, "w", encoding="utf-8") as f:
-            f.write(f"""#!/usr/bin/env bash
-exec "{main_bin}" run "{p['id']}" "$@"
+        for suffix in _iter_profile_shortcut_suffixes(p):
+            shortcut = local_bin / f"agy-{suffix}"
+            with open(shortcut, "w", encoding="utf-8") as f:
+                f.write(f"""#!/usr/bin/env bash
+exec "{main_bin}" run "{suffix}" "$@"
 """)
-        shortcut_id.chmod(0o755)
-        print(f"{GREEN}✓ Installed shortcut: {shortcut_id} -> {p['email']}{RESET}")
-
-        # Name-based shortcut (agy-work, agy-personal)
-        shortcut_name = local_bin / f"agy-{p['name']}"
-        with open(shortcut_name, "w", encoding="utf-8") as f:
-            f.write(f"""#!/usr/bin/env bash
-exec "{main_bin}" run "{p['name']}" "$@"
-""")
-        shortcut_name.chmod(0o755)
-        print(f"{GREEN}✓ Installed shortcut: {shortcut_name} -> {p['email']}{RESET}")
+            shortcut.chmod(0o755)
+            if not quiet:
+                print(f"{GREEN}✓ Installed shortcut: {shortcut} -> {p['email']}{RESET}")
 
     # 4. On Windows, also generate native .cmd wrappers
     if sys.platform == "win32":
         main_cmd = local_bin / "agy-multi.cmd"
         with open(main_cmd, "w", encoding="utf-8") as f:
             f.write("@echo off\r\npython -m agy_multi.cli %*\r\n")
-        print(f"{GREEN}✓ Installed Windows script: {main_cmd}{RESET}")
+        if not quiet:
+            print(f"{GREEN}✓ Installed Windows script: {main_cmd}{RESET}")
 
         auto_cmd = local_bin / "agy-auto.cmd"
         with open(auto_cmd, "w", encoding="utf-8") as f:
             f.write("@echo off\r\npython -m agy_multi.cli run %*\r\n")
-        print(f"{GREEN}✓ Installed Windows script: {auto_cmd}{RESET}")
+        if not quiet:
+            print(f"{GREEN}✓ Installed Windows script: {auto_cmd}{RESET}")
 
         for p in profiles:
-            p_id_cmd = local_bin / f"agy-{p['id']}.cmd"
-            with open(p_id_cmd, "w", encoding="utf-8") as f:
-                f.write(f"@echo off\r\npython -m agy_multi.cli run {p['id']} %*\r\n")
+            for suffix in _iter_profile_shortcut_suffixes(p):
+                p_cmd = local_bin / f"agy-{suffix}.cmd"
+                with open(p_cmd, "w", encoding="utf-8") as f:
+                    f.write(f"@echo off\r\npython -m agy_multi.cli run {suffix} %*\r\n")
 
-            p_name_cmd = local_bin / f"agy-{p['name']}.cmd"
-            with open(p_name_cmd, "w", encoding="utf-8") as f:
-                f.write(f"@echo off\r\npython -m agy_multi.cli run {p['name']} %*\r\n")
-
-    print(f"\n{BOLD}{CYAN}All shortcuts are available in your PATH!{RESET}")
-    print("You can run them in any terminal, Windows Terminal, or multiplexer pane directly.")
+    if not quiet:
+        print(f"\n{BOLD}{CYAN}All shortcuts are available in your PATH!{RESET}")
+        print("You can run them in any terminal, Windows Terminal, or multiplexer pane directly.")
     return 0
 
 

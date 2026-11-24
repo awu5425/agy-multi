@@ -129,12 +129,20 @@ class ProfileManager:
     def get_token_path(self, profile_name: str) -> Path:
         return self.get_profile_dir(profile_name) / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
 
+    @staticmethod
+    def _profile_sort_key(profile: Dict[str, Any]) -> tuple:
+        """Sort numeric profile IDs numerically ahead of non-numeric custom IDs."""
+        pid = str(profile.get("id", ""))
+        if pid.isdigit():
+            return (0, int(pid), "")
+        return (1, 0, pid)
+
     def list_profiles(self) -> List[Dict[str, Any]]:
         registry = self._load_registry()
         results = []
         raw_profiles = registry.get("profiles", [])
         try:
-            sorted_profiles = sorted(raw_profiles, key=lambda p: int(p.get("id", 0)) if str(p.get("id", "")).isdigit() else 999)
+            sorted_profiles = sorted(raw_profiles, key=self._profile_sort_key)
         except Exception:
             sorted_profiles = raw_profiles
         for p in sorted_profiles:
@@ -230,7 +238,7 @@ class ProfileManager:
 
         profiles.append(new_profile)
         try:
-            profiles = sorted(profiles, key=lambda p: int(p.get("id", 0)) if str(p.get("id", "")).isdigit() else 999)
+            profiles = sorted(profiles, key=self._profile_sort_key)
         except Exception:
             pass
         registry["profiles"] = profiles
@@ -370,7 +378,7 @@ class ProfileManager:
 
         profiles[target_idx] = target
         try:
-            profiles = sorted(profiles, key=lambda p: int(p.get("id", 0)) if str(p.get("id", "")).isdigit() else 999)
+            profiles = sorted(profiles, key=self._profile_sort_key)
         except Exception:
             pass
         registry["profiles"] = profiles

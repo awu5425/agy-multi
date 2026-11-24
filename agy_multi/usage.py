@@ -108,13 +108,20 @@ def parse_step_metadata(data: bytes) -> Dict[str, Any]:
 
 def normalize_model_family(raw: Optional[str]) -> str:
     """Normalize model string into canonical model family display names:
-    'Gemini 4 Argon', 'Gemini 3.8 Flash', 'Claude Models', 'Gemini Pro', 'GPT Models', 'Other'.
+    'Gemini 4 Neon', 'Gemini 4 Carbon', 'Gemini 4 Argon', 'Gemini 4 Hydrogen',
+    'Gemini 3.8 Flash', 'Claude Models', 'Gemini Pro', 'GPT Models', 'Other'.
     """
     if not raw:
         return "Gemini 3.8 Flash"
     lower = raw.lower()
-    if "argon" in lower:
+    if "neon" in lower or lower == "gemini-pro-orchestrator-neon":
+        return "Gemini 4 Neon"
+    if "carbon" in lower or lower == "gemini-pro-orchestrator":
+        return "Gemini 4 Carbon"
+    if "argon" in lower or lower == "gemini-pro-orchestrator-g1-pro":
         return "Gemini 4 Argon"
+    if "hydrogen" in lower:
+        return "Gemini 4 Hydrogen"
     if "flash" in lower:
         return "Gemini 3.8 Flash"
     if any(k in lower for k in ("claude", "opus", "sonnet")):
@@ -483,10 +490,49 @@ def fetch_official_quota(profile_dir: Path, use_cache: bool = True) -> Dict[str,
                 }
             res["groups"][g_key] = g_info
 
+    subscription = fetch_subscription(active_token or "")
+
     # 2. Parse granular per-model quotas
     raw_models = (models_data or {}).get("models", {})
     pname = profile_dir.name.lower()
-    is_5_5_account = pname in ("martin", "biif", "agy-3", "agy-5", "3", "5") or any("5-5" in k for k in raw_models)
+
+    g_group_info = res.get("groups", {}).get("gemini", {})
+    g_desc_lower = str(g_group_info.get("description") or "").lower()
+    c_group_info = res.get("groups", {}).get("claude_gpt", {})
+    c_desc_lower = str(c_group_info.get("description") or "").lower()
+    sub_tier = (subscription or {}).get("tier")
+
+    has_claude_5_5 = (
+        "5.5" in c_desc_lower
+        or any("5-5" in k for k in raw_models)
+        or (
+            not c_desc_lower
+            and not any("4-6" in k for k in raw_models)
+            and pname in ("panya", "martin", "biif", "agy-1", "agy-3", "agy-4", "agy-5", "1", "3", "4", "5")
+        )
+    )
+    has_dedicated_argon_group = "argon" in res.get("groups", {})
+    has_shared_gemini_pool = (
+        not has_dedicated_argon_group
+        and (
+            "carbon" in g_desc_lower
+            or "argon" in g_desc_lower
+            or sub_tier == "ULTRA"
+            or any("carbon" in k for k in raw_models)
+        )
+    )
+    has_separate_argon = (
+        not has_shared_gemini_pool
+        and (
+            has_dedicated_argon_group
+            or any("argon" in k for k in raw_models)
+            or has_claude_5_5
+        )
+    )
+    if sub_tier == "PRO" and not has_separate_argon and not has_shared_gemini_pool:
+        subscription = dict(subscription)
+        subscription["label"] = "JIO"
+        subscription["variant"] = "JIO"
 
     # Defaults from aggregate groups if present
     g_5h = res.get("groups", {}).get("gemini", {}).get("buckets", {}).get("gemini-5h", {})
@@ -552,9 +598,176 @@ def fetch_official_quota(profile_dir: Path, use_cache: bool = True) -> Dict[str,
                 pass
         return def_rem, def_reset, rts
 
+    def _build_flash_model(sort_order: int, recommended: bool) -> Dict[str, Any]:
+        flash_rem, flash_rt, flash_rts = _extract_q(
+            ["gemini-3.8-flash-tiered", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3-flash",
+             "gemini-4-neon-high", "gemini-4-neon-medium", "gemini-4-hydrogen-sonar", "gemini-2.5-pro"],
+            def_g_rem,
+            def_g_reset,
+        )
+        now_ts = time.time()
+        # If resetTime is > 5.5 hours away, server returned weekly limit tier quota, not 5h rolling limit
+        is_flash_weekly = bool(flash_rts and (flash_rts - now_ts > 5.5 * 3600))
+        if is_flash_weekly:
+            flash_wk_rem = flash_rem
+            flash_wk_rt = flash_rt
+            flash_wk_rts = flash_rts
+            is_flash_wk_exhausted = bool(flash_wk_rem <= 0.01)
+            flash_5h_rem = 0.0 if is_flash_wk_exhausted else 1.0
+            flash_5h_rt = None
+            flash_5h_rts = None
+        else:
+            flash_5h_rem = flash_rem
+            flash_5h_rt = flash_rt
+            flash_5h_rts = flash_rts
+            flash_wk_rem = def_g_wk_rem
+            flash_wk_rt = def_g_wk_reset or default_wk_reset
+            flash_wk_rts = def_g_wk_rts or default_wk_rts
+
+        is_general_gemini_pool = bool(
+            has_separate_argon
+            or "neon" in g_desc_lower
+            or "hydrogen" in g_desc_lower
+            or (sub_tier == "PRO" and (subscription or {}).get("variant") != "JIO")
+        )
+        flash_display_name = (
+            "Gemini" if is_general_gemini_pool else "Gemini 3.8 Flash"
+        )
+        default_flash_desc = (
+            "Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen, Orchestrator (Neon), Gemini 3.8 Flash"
+            if is_general_gemini_pool
+            else "Gemini 3.8 Flash high efficiency model"
+        )
+
+        return {
+            "id": "gemini-3.8-flash",
+            "displayName": flash_display_name,
+            "provider": "Google Gemini",
+            "providerCode": "gemini",
+            "sortOrder": sort_order,
+            "has5h": True,
+            "hasWeekly": True,
+            "remainingFraction": flash_5h_rem if not is_flash_weekly else flash_wk_rem,
+            "remainingPct": round((flash_5h_rem if not is_flash_weekly else flash_wk_rem) * 100, 1),
+            "resetTime": flash_5h_rt or (flash_wk_rt if is_flash_weekly else None),
+            "resetTs": flash_5h_rts or (flash_wk_rts if is_flash_weekly else None),
+            "remaining5hPct": round(flash_5h_rem * 100, 1),
+            "reset5hTs": flash_5h_rts,
+            "remainingWkPct": round(flash_wk_rem * 100, 1),
+            "resetWkTs": flash_wk_rts,
+            "resetWkTime": flash_wk_rt,
+            "recommended": recommended,
+            "tagTitle": None,
+            "tagDescription": g_group_info.get("description") or default_flash_desc,
+            "supportsThinking": True,
+        }
+
+    def _build_claude_model(sort_order: int) -> Dict[str, Any]:
+        if has_claude_5_5:
+            keys = ["claude-opus-5-5-high", "claude-sonnet-5-5-high", "claude-opus-5-5-medium", "claude-sonnet-5-5-medium"]
+            model_id = "claude-models-5-5"
+            display_name = "Claude Models (Opus 5.5 / Sonnet 5.5)"
+            tag_title = "New"
+            recommended = True
+        else:
+            keys = ["claude-opus-4-6-thinking", "claude-sonnet-4-6"]
+            model_id = "claude-models-4-6"
+            display_name = "Claude Models (Opus 4.6 / Sonnet 4.6)"
+            tag_title = None
+            recommended = False
+        c_rem, c_rt, c_rts = _extract_q(keys, def_c_rem, def_c_reset)
+        if is_c_depleted:
+            c_rem = 0.0
+            c_rt = default_wk_reset
+            c_rts = default_wk_rts
+        return {
+            "id": model_id,
+            "displayName": display_name,
+            "provider": "Anthropic Claude",
+            "providerCode": "anthropic",
+            "sortOrder": sort_order,
+            "has5h": True,
+            "hasWeekly": True,
+            "remainingFraction": c_rem,
+            "remainingPct": round(c_rem * 100, 1),
+            "resetTime": c_rt,
+            "resetTs": c_rts,
+            "remaining5hPct": round(c_rem * 100, 1),
+            "reset5hTs": c_rts,
+            "remainingWkPct": round(def_c_wk_rem * 100, 1),
+            "resetWkTs": def_c_wk_rts or default_wk_rts,
+            "recommended": recommended,
+            "tagTitle": tag_title,
+            "tagDescription": display_name,
+            "supportsThinking": True,
+        }
+
     model_list = []
-    if is_5_5_account:
-        # 1. Gemini 4 Argon: 7D & 5H (has5h: True, hasWeekly: True)
+    if has_shared_gemini_pool:
+        # Pro and Ultra accounts can share a single Gemini quota pool across Neon, Carbon, Argon, Hydrogen, and Flash
+        if g_wk and g_5h:
+            pool_wk_rem = def_g_wk_rem
+            pool_wk_rt = def_g_wk_reset or default_wk_reset
+            pool_wk_rts = def_g_wk_rts or default_wk_rts
+            if bucket_is_depleted(g_wk):
+                pool_5h_rem = 0.0
+                pool_5h_rt = pool_wk_rt
+                pool_5h_rts = pool_wk_rts
+            else:
+                pool_5h_rem = def_g_rem
+                pool_5h_rt = def_g_reset
+                pool_5h_rts = def_g_rts
+        else:
+            raw_p_rem, raw_p_rt, raw_p_rts = _extract_q(
+                ["gemini-3.8-flash-tiered", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3-flash", "gemini-2.5-pro"],
+                def_g_rem,
+                def_g_reset,
+            )
+            now_ts = time.time()
+            is_pool_weekly = bool(raw_p_rts and (raw_p_rts - now_ts > 5.5 * 3600))
+            if is_pool_weekly:
+                pool_wk_rem = raw_p_rem
+                pool_wk_rt = raw_p_rt
+                pool_wk_rts = raw_p_rts
+                is_pool_wk_ex = bool(pool_wk_rem <= 0.01)
+                pool_5h_rem = 0.0 if is_pool_wk_ex else 1.0
+                pool_5h_rt = pool_wk_rt if is_pool_wk_ex else None
+                pool_5h_rts = pool_wk_rts if is_pool_wk_ex else None
+            else:
+                pool_5h_rem = def_g_rem if g_5h else raw_p_rem
+                pool_5h_rt = def_g_reset if g_5h else raw_p_rt
+                pool_5h_rts = def_g_rts if g_5h else raw_p_rts
+                pool_wk_rem = def_g_wk_rem if g_wk else 1.0
+                pool_wk_rt = def_g_wk_reset or default_wk_reset
+                pool_wk_rts = def_g_wk_rts or default_wk_rts
+
+        pool_5h_rem = 1.0 if pool_5h_rem is None else pool_5h_rem
+        pool_wk_rem = 1.0 if pool_wk_rem is None else pool_wk_rem
+        model_list.append({
+            "id": "gemini-models",
+            "displayName": "Gemini",
+            "provider": "Google Gemini",
+            "providerCode": "gemini",
+            "sortOrder": 1,
+            "has5h": True,
+            "hasWeekly": True,
+            "remainingFraction": min(pool_5h_rem, pool_wk_rem),
+            "remainingPct": round(min(pool_5h_rem, pool_wk_rem) * 100, 1),
+            "resetTime": pool_wk_rt if (pool_wk_rem < pool_5h_rem) else pool_5h_rt,
+            "resetTs": pool_wk_rts if (pool_wk_rem < pool_5h_rem) else pool_5h_rts,
+            "remaining5hPct": round(pool_5h_rem * 100, 1),
+            "reset5hTs": pool_5h_rts,
+            "remainingWkPct": round(pool_wk_rem * 100, 1),
+            "resetWkTs": pool_wk_rts,
+            "resetWkTime": pool_wk_rt,
+            "recommended": True,
+            "tagTitle": "New",
+            "tagDescription": g_group_info.get("description") or "Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Orchestrator (Neon), Orchestrator (Carbon), Orchestrator (Argon), Gemini 3.8 Flash",
+            "supportsThinking": True,
+        })
+        model_list.append(_build_claude_model(sort_order=2))
+    elif has_separate_argon:
+        # 1. Gemini 4 Argon: 7D weekly limit only on Pro plans (has5h: False unless dedicated 5h bucket exists)
         # Dedicated quota group ("Gemini 4 Argon") with weekly limit bucket (gemini-argon-wtu-weekly)
         # on Pro plans, or shares Gemini pool / granular model fallback.
         argon_group = res.get("groups", {}).get("argon", {})
@@ -615,20 +828,36 @@ def fetch_official_quota(profile_dir: Path, use_cache: bool = True) -> Dict[str,
             argon_wk_rt = def_g_wk_reset or default_wk_reset
             argon_wk_rts = def_g_wk_rts or default_wk_rts
 
+        has_argon_5h = bool(argon_5h_b is not None)
+        if has_argon_5h:
+            argon_rem_frac = min(argon_5h_rem, argon_wk_rem)
+            argon_rem_pct = round(argon_rem_frac * 100, 1)
+            argon_rt = argon_wk_rt if (argon_wk_rem < argon_5h_rem) else argon_5h_rt
+            argon_rts = argon_wk_rts if (argon_wk_rem < argon_5h_rem) else argon_5h_rts
+            argon_rem_5h_pct = round(argon_5h_rem * 100, 1)
+            argon_reset_5h_ts = argon_5h_rts
+        else:
+            argon_rem_frac = argon_wk_rem
+            argon_rem_pct = round(argon_wk_rem * 100, 1)
+            argon_rt = argon_wk_rt
+            argon_rts = argon_wk_rts
+            argon_rem_5h_pct = None
+            argon_reset_5h_ts = None
+
         model_list.append({
             "id": "gemini-4-argon",
             "displayName": "Gemini 4 Argon",
             "provider": "Google Gemini",
             "providerCode": "gemini",
             "sortOrder": 1,
-            "has5h": True,
+            "has5h": has_argon_5h,
             "hasWeekly": True,
-            "remainingFraction": min(argon_5h_rem, argon_wk_rem),
-            "remainingPct": round(min(argon_5h_rem, argon_wk_rem) * 100, 1),
-            "resetTime": argon_wk_rt if (argon_wk_rem < argon_5h_rem) else argon_5h_rt,
-            "resetTs": argon_wk_rts if (argon_wk_rem < argon_5h_rem) else argon_5h_rts,
-            "remaining5hPct": round(argon_5h_rem * 100, 1),
-            "reset5hTs": argon_5h_rts,
+            "remainingFraction": argon_rem_frac,
+            "remainingPct": argon_rem_pct,
+            "resetTime": argon_rt,
+            "resetTs": argon_rts,
+            "remaining5hPct": argon_rem_5h_pct,
+            "reset5hTs": argon_reset_5h_ts,
             "remainingWkPct": round(argon_wk_rem * 100, 1),
             "resetWkTs": argon_wk_rts,
             "resetWkTime": argon_wk_rt,
@@ -637,164 +866,12 @@ def fetch_official_quota(profile_dir: Path, use_cache: bool = True) -> Dict[str,
             "tagDescription": "Gemini 4 Argon reasoning model",
             "supportsThinking": True,
         })
-        # 2. Gemini 3.8 Flash: 7D & 5H (has5h: True, hasWeekly: True)
-        flash_rem, flash_rt, flash_rts = _extract_q(
-            ["gemini-3.8-flash-tiered", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3-flash", "gemini-2.5-pro"],
-            def_g_rem,
-            def_g_reset,
-        )
-        now_ts = time.time()
-        # If resetTime is > 5.5 hours away, server returned weekly limit tier quota, not 5h rolling limit
-        is_flash_weekly = bool(flash_rts and (flash_rts - now_ts > 5.5 * 3600))
-        if is_flash_weekly:
-            flash_wk_rem = flash_rem
-            flash_wk_rt = flash_rt
-            flash_wk_rts = flash_rts
-            is_flash_wk_exhausted = bool(flash_wk_rem <= 0.01)
-            flash_5h_rem = 0.0 if is_flash_wk_exhausted else 1.0
-            flash_5h_rt = None
-            flash_5h_rts = None
-        else:
-            flash_5h_rem = flash_rem
-            flash_5h_rt = flash_rt
-            flash_5h_rts = flash_rts
-            flash_wk_rem = def_g_wk_rem
-            flash_wk_rt = def_g_wk_reset or default_wk_reset
-            flash_wk_rts = def_g_wk_rts or default_wk_rts
-
-        model_list.append({
-            "id": "gemini-3.8-flash",
-            "displayName": "Gemini 3.8 Flash",
-            "provider": "Google Gemini",
-            "providerCode": "gemini",
-            "sortOrder": 2,
-            "has5h": True,
-            "hasWeekly": True,
-            "remainingFraction": flash_5h_rem if not is_flash_weekly else flash_wk_rem,
-            "remainingPct": round((flash_5h_rem if not is_flash_weekly else flash_wk_rem) * 100, 1),
-            "resetTime": flash_5h_rt or (flash_wk_rt if is_flash_weekly else None),
-            "resetTs": flash_5h_rts or (flash_wk_rts if is_flash_weekly else None),
-            "remaining5hPct": round(flash_5h_rem * 100, 1),
-            "reset5hTs": flash_5h_rts,
-            "remainingWkPct": round(flash_wk_rem * 100, 1),
-            "resetWkTs": flash_wk_rts,
-            "resetWkTime": flash_wk_rt,
-            "recommended": False,
-            "tagTitle": None,
-            "tagDescription": "Gemini 3.8 Flash high efficiency model",
-            "supportsThinking": True,
-        })
-        # 3. Claude Models (Opus 5.5 / Sonnet 5.5): 7D & 5H (has5h: True, hasWeekly: True)
-        c_rem, c_rt, c_rts = _extract_q(
-            ["claude-opus-5-5-high", "claude-sonnet-5-5-high", "claude-opus-5-5-medium", "claude-sonnet-5-5-medium"],
-            def_c_rem,
-            def_c_reset,
-        )
-        if is_c_depleted:
-            c_rem = 0.0
-            c_rt = default_wk_reset
-            c_rts = default_wk_rts
-        model_list.append({
-            "id": "claude-models-5-5",
-            "displayName": "Claude Models (Opus 5.5 / Sonnet 5.5)",
-            "provider": "Anthropic Claude",
-            "providerCode": "anthropic",
-            "sortOrder": 3,
-            "has5h": True,
-            "hasWeekly": True,
-            "remainingFraction": c_rem,
-            "remainingPct": round(c_rem * 100, 1),
-            "resetTime": c_rt,
-            "resetTs": c_rts,
-            "remaining5hPct": round(c_rem * 100, 1),
-            "reset5hTs": c_rts,
-            "remainingWkPct": round(def_c_wk_rem * 100, 1),
-            "resetWkTs": def_c_wk_rts or default_wk_rts,
-            "recommended": True,
-            "tagTitle": "New",
-            "tagDescription": "Claude Models (Opus 5.5 / Sonnet 5.5)",
-            "supportsThinking": True,
-        })
+        model_list.append(_build_flash_model(sort_order=2, recommended=False))
+        model_list.append(_build_claude_model(sort_order=3))
     else:
-        # Other accounts: Gemini 3.8 Flash, Claude Models (Opus 4.6 / Sonnet 4.6)
-        # 1. Gemini 3.8 Flash: 7D & 5H (has5h: True, hasWeekly: True)
-        flash_rem, flash_rt, flash_rts = _extract_q(
-            ["gemini-3.8-flash-tiered", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3-flash", "gemini-2.5-pro"],
-            def_g_rem,
-            def_g_reset,
-        )
-        now_ts = time.time()
-        # If resetTime is > 5.5 hours away, server returned weekly limit tier quota, not 5h rolling limit
-        is_flash_weekly = bool(flash_rts and (flash_rts - now_ts > 5.5 * 3600))
-        if is_flash_weekly:
-            flash_wk_rem = flash_rem
-            flash_wk_rt = flash_rt
-            flash_wk_rts = flash_rts
-            is_flash_wk_exhausted = bool(flash_wk_rem <= 0.01)
-            flash_5h_rem = 0.0 if is_flash_wk_exhausted else 1.0
-            flash_5h_rt = None
-            flash_5h_rts = None
-        else:
-            flash_5h_rem = flash_rem
-            flash_5h_rt = flash_rt
-            flash_5h_rts = flash_rts
-            flash_wk_rem = def_g_wk_rem
-            flash_wk_rt = def_g_wk_reset or default_wk_reset
-            flash_wk_rts = def_g_wk_rts or default_wk_rts
-
-        model_list.append({
-            "id": "gemini-3.8-flash",
-            "displayName": "Gemini 3.8 Flash",
-            "provider": "Google Gemini",
-            "providerCode": "gemini",
-            "sortOrder": 1,
-            "has5h": True,
-            "hasWeekly": True,
-            "remainingFraction": flash_5h_rem if not is_flash_weekly else flash_wk_rem,
-            "remainingPct": round((flash_5h_rem if not is_flash_weekly else flash_wk_rem) * 100, 1),
-            "resetTime": flash_5h_rt or (flash_wk_rt if is_flash_weekly else None),
-            "resetTs": flash_5h_rts or (flash_wk_rts if is_flash_weekly else None),
-            "remaining5hPct": round(flash_5h_rem * 100, 1),
-            "reset5hTs": flash_5h_rts,
-            "remainingWkPct": round(flash_wk_rem * 100, 1),
-            "resetWkTs": flash_wk_rts,
-            "resetWkTime": flash_wk_rt,
-            "recommended": True,
-            "tagTitle": None,
-            "tagDescription": "Gemini 3.8 Flash high efficiency model",
-            "supportsThinking": True,
-        })
-        # 2. Claude Models (Opus 4.6 / Sonnet 4.6): 7D & 5H (has5h: True, hasWeekly: True)
-        c_rem, c_rt, c_rts = _extract_q(
-            ["claude-opus-4-6-thinking", "claude-sonnet-4-6"],
-            def_c_rem,
-            def_c_reset,
-        )
-        if is_c_depleted:
-            c_rem = 0.0
-            c_rt = default_wk_reset
-            c_rts = default_wk_rts
-        model_list.append({
-            "id": "claude-models-4-6",
-            "displayName": "Claude Models (Opus 4.6 / Sonnet 4.6)",
-            "provider": "Anthropic Claude",
-            "providerCode": "anthropic",
-            "sortOrder": 2,
-            "has5h": True,
-            "hasWeekly": True,
-            "remainingFraction": c_rem,
-            "remainingPct": round(c_rem * 100, 1),
-            "resetTime": c_rt,
-            "resetTs": c_rts,
-            "remaining5hPct": round(c_rem * 100, 1),
-            "reset5hTs": c_rts,
-            "remainingWkPct": round(def_c_wk_rem * 100, 1),
-            "resetWkTs": def_c_wk_rts or default_wk_rts,
-            "recommended": False,
-            "tagTitle": "Thinking",
-            "tagDescription": "Claude Models (Opus 4.6 / Sonnet 4.6)",
-            "supportsThinking": True,
-        })
+        # Other accounts: Gemini 3.8 Flash, Claude Models
+        model_list.append(_build_flash_model(sort_order=1, recommended=True))
+        model_list.append(_build_claude_model(sort_order=2))
 
     res["models"] = model_list
 
@@ -808,7 +885,7 @@ def fetch_official_quota(profile_dir: Path, use_cache: bool = True) -> Dict[str,
             g_wk_rep = next((m for m in gemini_models if m.get("id") == "gemini-3.8-flash"), gemini_models[0])
             res["groups"]["gemini"] = {
                 "displayName": "Gemini models",
-                "description": "Models within this group: Gemini 4 Argon, Gemini 3.8 Flash",
+                "description": "Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen, Orchestrator (Neon), Gemini 3.8 Flash",
                 "buckets": {
                     "gemini-5h": {
                         "bucketId": "gemini-5h",
@@ -869,7 +946,8 @@ def fetch_official_quota(profile_dir: Path, use_cache: bool = True) -> Dict[str,
                 }
             }
 
-    # 5. Synthesize 'argon' group if missing and an Argon model is present
+    # 5. Synthesize 'argon' group only when a dedicated separate gemini-4-argon model is present
+    # (never synthesize a fake 'argon' group for merged shared Gemini pools)
     if "argon" not in res["groups"]:
         argon_models = [m for m in model_list if m.get("id") == "gemini-4-argon"]
         if argon_models:
@@ -892,7 +970,7 @@ def fetch_official_quota(profile_dir: Path, use_cache: bool = True) -> Dict[str,
                 }
             }
 
-    res["subscription"] = fetch_subscription(active_token or "")
+    res["subscription"] = subscription
 
     if res.get("available") and use_cache:
         _QUOTA_CACHE[cache_key] = (now, token_mtime, res)
@@ -932,7 +1010,7 @@ def subscription_from_load_code_assist(data: Optional[Dict[str, Any]]) -> Dict[s
     unknown so a failed request is not shown as a free plan.
     """
     if not isinstance(data, dict):
-        return {"tier": None, "label": None, "ineligible": []}
+        return {"tier": None, "label": None, "multiplier": None, "tier_id": None, "ineligible": []}
 
     def ident(tier: Any) -> Optional[str]:
         if not isinstance(tier, dict):
@@ -940,7 +1018,8 @@ def subscription_from_load_code_assist(data: Optional[Dict[str, Any]]) -> Dict[s
         value = tier.get("id") or tier.get("name")
         return str(value) if value else None
 
-    raw = ident(data.get("paidTier")) or ident(data.get("currentTier"))
+    paid_tier = data.get("paidTier") if isinstance(data.get("paidTier"), dict) else None
+    raw = ident(paid_tier) or ident(data.get("currentTier"))
     if not raw:
         for tier in data.get("allowedTiers") or []:
             if not isinstance(tier, dict):
@@ -953,8 +1032,30 @@ def subscription_from_load_code_assist(data: Optional[Dict[str, Any]]) -> Dict[s
     for item in data.get("ineligibleTiers") or []:
         if isinstance(item, dict) and item.get("reasonCode"):
             ineligible.append(str(item["reasonCode"]))
-    labels = {"FREE": "Free", "PRO": "Pro", "ULTRA": "Ultra"}
-    return {"tier": tier, "label": labels.get(tier, tier), "ineligible": ineligible}
+
+    raw_lower = (raw or "").strip().lower()
+    upgrade_txt = str((paid_tier or {}).get("upgradeSubscriptionText") or "").lower()
+    multiplier = None
+    if tier == "ULTRA":
+        if "ultra-lite" in raw_lower or "5x" in raw_lower or "higher google ai ultra" in upgrade_txt:
+            multiplier = "5x"
+            label = "Ultra 5x"
+        else:
+            multiplier = "20x"
+            label = "Ultra 20x"
+    elif tier == "PRO":
+        multiplier = "1x"
+        label = "Pro"
+    else:
+        label = {"FREE": "Free"}.get(tier, tier)
+
+    return {
+        "tier": tier,
+        "label": label,
+        "multiplier": multiplier,
+        "tier_id": raw,
+        "ineligible": ineligible,
+    }
 
 
 def fetch_subscription(access_token: str) -> Dict[str, Any]:
@@ -1728,6 +1829,12 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       transform: translateY(-1px);
     }}
 
+    .btn.btn-active-mask {{
+      border-color: rgba(56, 189, 248, 0.45);
+      background: rgba(56, 189, 248, 0.14);
+      color: #38bdf8;
+    }}
+
     .btn-primary {{
       background: linear-gradient(135deg, #0284c7, #2563eb);
       border: none;
@@ -1863,9 +1970,61 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       position: relative;
     }}
 
+    .account-card.card-ultra {{
+      border-color: rgba(168, 85, 247, 0.35);
+      background: linear-gradient(180deg, rgba(168, 85, 247, 0.06) 0%, rgba(18, 26, 43, 0.85) 100%);
+    }}
+
     .account-card.card-exhausted {{
       border-color: rgba(244, 63, 94, 0.3);
       background: linear-gradient(180deg, rgba(244, 63, 94, 0.05) 0%, rgba(18, 26, 43, 0.85) 100%);
+    }}
+
+    .tier-badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.65rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      padding: 0.22rem 0.55rem;
+      border-radius: 9999px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      text-transform: uppercase;
+    }}
+
+    .tier-badge.tier-ultra-20x {{
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.24), rgba(168, 85, 247, 0.26));
+      color: #fde68a;
+      border: 1px solid rgba(251, 191, 36, 0.5);
+      box-shadow: 0 0 12px rgba(245, 158, 11, 0.22);
+    }}
+
+    .tier-badge.tier-ultra-5x {{
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.22), rgba(168, 85, 247, 0.24));
+      color: #bae6fd;
+      border: 1px solid rgba(56, 189, 248, 0.48);
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.18);
+    }}
+
+    .tier-badge.tier-pro {{
+      background: rgba(59, 130, 246, 0.14);
+      color: #93c5fd;
+      border: 1px solid rgba(96, 165, 250, 0.32);
+    }}
+
+    .tier-badge.tier-jio {{
+      background: rgba(20, 184, 166, 0.14);
+      color: #5eead4;
+      border: 1px solid rgba(45, 212, 191, 0.34);
+    }}
+
+    .tier-badge.tier-free {{
+      background: rgba(148, 163, 184, 0.12);
+      color: #94a3b8;
+      border: 1px solid rgba(148, 163, 184, 0.28);
     }}
 
     .account-card:hover {{
@@ -3271,6 +3430,10 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           <span>🌐</span>
           <span id="lang-btn-text">English</span>
         </button>
+        <button class="btn" id="mask-email-btn" onclick="toggleEmailMask()" style="display:inline-flex;align-items:center;gap:6px">
+          <span id="mask-email-icon">🙈</span>
+          <span id="txt-mask-email">邮箱打码</span>
+        </button>
         <button class="btn" id="accounts-view-btn" onclick="toggleAccountAdmin()" style="display:inline-flex;align-items:center;gap:6px">
           <span>☰</span>
           <span id="txt-accounts-btn">账号清单</span>
@@ -3683,6 +3846,9 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         relayReasonQuotaUnavail: "配额不可用",
         relayReasonIneligible: "账号不可用",
         noOtherAccounts: "未配置其他账号",
+        maskEmailBtn: "邮箱打码",
+        unmaskEmailBtn: "显示邮箱",
+        emailMaskedTip: "已打码",
       }},
       en: {{
         title: "Multi-Account Dashboard",
@@ -3880,10 +4046,49 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         statusOn: "ON",
         statusOff: "OFF",
         lblAutoRelayStat: "Auto Relay:",
+        maskEmailBtn: "Mask Email",
+        unmaskEmailBtn: "Show Email",
+        emailMaskedTip: "Masked",
       }}
     }};
 
     let currentLang = localStorage.getItem('agy_dashboard_lang') || 'zh';
+    let emailMasked = localStorage.getItem('agy_mask_email') === '1';
+
+    function maskEmailStr(raw) {{
+      if (!raw || raw === '-') return raw || '-';
+      const s = String(raw).trim();
+      const atIdx = s.indexOf('@');
+      if (atIdx <= 0) {{
+        return s.length > 2 ? (s.slice(0, 2) + '****') : '***';
+      }}
+      const local = s.slice(0, atIdx);
+      const domain = s.slice(atIdx + 1);
+      const maskedLocal = (local.length > 3 ? local.slice(0, 2) : local.slice(0, 1)) + '****';
+      const dotIdx = domain.lastIndexOf('.');
+      const maskedDomain = dotIdx > 0 ? (domain.slice(0, 1) + '***' + domain.slice(dotIdx)) : '***';
+      return `${{maskedLocal}}@${{maskedDomain}}`;
+    }}
+
+    function formatEmail(raw) {{
+      return emailMasked ? maskEmailStr(raw) : (raw || '-');
+    }}
+
+    function updateEmailMaskBtn() {{
+      const btn = document.getElementById('mask-email-btn');
+      const icon = document.getElementById('mask-email-icon');
+      const txt = document.getElementById('txt-mask-email');
+      if (icon) icon.innerText = emailMasked ? '👁️' : '🙈';
+      if (txt) txt.innerText = emailMasked ? t('unmaskEmailBtn') : t('maskEmailBtn');
+      if (btn) btn.classList.toggle('btn-active-mask', emailMasked);
+    }}
+
+    function toggleEmailMask() {{
+      emailMasked = !emailMasked;
+      localStorage.setItem('agy_mask_email', emailMasked ? '1' : '0');
+      initDashboard();
+      updateCountdowns();
+    }}
 
     function t(key) {{
       if (I18N[currentLang] && Object.prototype.hasOwnProperty.call(I18N[currentLang], key)) {{
@@ -3902,6 +4107,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       setEl('dash-subtitle', t('subtitle'));
       setEl('txt-live', t('live'));
       setEl('lang-btn-text', t('langBtn'));
+      updateEmailMaskBtn();
       setEl('txt-policy-btn', t('policyBtn'));
       setEl('txt-accounts-btn', accountAdminOpen ? t('backToBoard') : t('accountsBtn'));
       setEl('txt-accounts-title', t('accountsTitle'));
@@ -4004,8 +4210,38 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       return (num || 0).toLocaleString();
     }}
 
+    function escAttr(str) {{
+      return String(str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }}
+
+    function renderTierBadge(sub) {{
+      const s = sub || {{}};
+      const tier = (s.tier || '').toUpperCase();
+      const label = String(s.label || '');
+      const mult = String(s.multiplier || '');
+      if (tier === 'ULTRA') {{
+        const is5x = (mult === '5x' || label.toLowerCase().includes('5x'));
+        const cls = is5x ? 'tier-ultra-5x' : 'tier-ultra-20x';
+        const text = is5x ? '⚡ ULTRA 5x' : '⚡ ULTRA 20x';
+        return `<span class="tier-badge ${{cls}}" title="${{escAttr(label || text)}}">${{text}}</span>`;
+      }}
+      if (tier === 'JIO' || String(s.variant || '').toUpperCase() === 'JIO' || label.toUpperCase() === 'JIO') {{
+        return `<span class="tier-badge tier-jio" title="JIO (Google AI Pro without Argon)">JIO</span>`;
+      }}
+      if (tier === 'PRO') {{
+        return `<span class="tier-badge tier-pro" title="${{escAttr(label || 'Pro')}}">PRO</span>`;
+      }}
+      if (label) {{
+        return `<span class="tier-badge tier-free" title="${{escAttr(label)}}">${{escAttr(label.toUpperCase())}}</span>`;
+      }}
+      return '';
+    }}
+
     function exportData() {{
-      const blob = new Blob([JSON.stringify(data, null, 2)], {{ type: 'application/json' }});
+      const payload = emailMasked
+        ? Object.assign({{}}, data, {{ accounts: (data.accounts || []).map(a => Object.assign({{}}, a, {{ email: maskEmailStr(a.email) }})) }})
+        : data;
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {{ type: 'application/json' }});
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -4330,13 +4566,29 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         let modelQuotasHtml = '';
         let modelsToRender = (oq.models && oq.models.length > 0) ? oq.models.slice() : null;
         if (!modelsToRender || modelsToRender.length === 0) {{
-          const is55 = (acc.id === 3 || acc.id === 5 || acc.name === 'martin' || acc.name === 'biif' || acc.name === 'agy-3' || acc.name === 'agy-5');
+          const subObjFallback = acc.subscription || {{}};
+          const gDescLower = ((gGroup && gGroup.description) || '').toLowerCase();
+          const cDescLower = ((cGroup && cGroup.description) || '').toLowerCase();
+          const hasArgonGroup = !!(oq.groups && oq.groups.argon);
+          const isSharedGeminiPool = !hasArgonGroup && (
+            gDescLower.includes('carbon') || gDescLower.includes('argon') || subObjFallback.tier === 'ULTRA'
+          );
+          const isSharedClaude55 = cDescLower.includes('5.5');
+          const is55 = !isSharedGeminiPool && (
+            hasArgonGroup
+            || (subObjFallback.tier === 'PRO' && subObjFallback.variant !== 'JIO' && String(subObjFallback.label || '').toUpperCase() !== 'JIO')
+            || gDescLower.includes('neon')
+            || gDescLower.includes('hydrogen')
+            || acc.id == 1 || acc.id == 3 || acc.id == 4 || acc.id == 5
+            || acc.name === 'panya' || acc.name === 'martin' || acc.name === 'biif'
+            || acc.name === 'agy-1' || acc.name === 'agy-3' || acc.name === 'agy-4' || acc.name === 'agy-5'
+          );
           const defWkTs = (cWk && cWk.resetTs) ? cWk.resetTs : ((gWk && gWk.resetTs) ? gWk.resetTs : 0);
-          if (is55) {{
+          if (isSharedGeminiPool) {{
             modelsToRender = [
               {{
-                id: 'gemini-4-argon',
-                displayName: 'Gemini 4 Argon',
+                id: 'gemini-models',
+                displayName: 'Gemini',
                 provider: 'Google Gemini',
                 providerCode: 'gemini',
                 sortOrder: 1,
@@ -4347,11 +4599,43 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
                 remaining5hPct: (g5h ? pct5hInt : 100),
                 reset5hTs: (g5h ? g5h.resetTs : 0),
                 tagTitle: 'New',
+                tagDescription: (gGroup && gGroup.description) || 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Orchestrator (Neon), Orchestrator (Carbon), Orchestrator (Argon), Gemini 3.8 Flash',
+                supportsThinking: true
+              }},
+              {{
+                id: isSharedClaude55 ? 'claude-models-5-5' : 'claude-models-4-6',
+                displayName: isSharedClaude55 ? 'Claude Models (Opus 5.5 / Sonnet 5.5)' : 'Claude Models (Opus 4.6 / Sonnet 4.6)',
+                provider: 'Anthropic Claude',
+                providerCode: 'anthropic',
+                sortOrder: 2,
+                has5h: true,
+                hasWeekly: true,
+                remainingWkPct: (cWk ? pctClaudeWkInt : 0),
+                resetWkTs: (cWk ? cWk.resetTs : defWkTs),
+                remaining5hPct: (c5h ? pctClaude5hInt : 0),
+                reset5hTs: (c5h ? c5h.resetTs : 0),
+                tagTitle: isSharedClaude55 ? 'New' : null,
+                supportsThinking: true
+              }}
+            ];
+          }} else if (is55) {{
+            modelsToRender = [
+              {{
+                id: 'gemini-4-argon',
+                displayName: 'Gemini 4 Argon',
+                provider: 'Google Gemini',
+                providerCode: 'gemini',
+                sortOrder: 1,
+                has5h: false,
+                hasWeekly: true,
+                remainingWkPct: (gWk ? pctWkInt : 100),
+                resetWkTs: defWkTs,
+                tagTitle: 'New',
                 supportsThinking: true
               }},
               {{
                 id: 'gemini-3.8-flash',
-                displayName: 'Gemini 3.8 Flash',
+                displayName: 'Gemini',
                 provider: 'Google Gemini',
                 providerCode: 'gemini',
                 sortOrder: 2,
@@ -4361,6 +4645,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
                 resetWkTs: defWkTs,
                 remaining5hPct: (g5h ? pct5hInt : 100),
                 reset5hTs: (g5h ? g5h.resetTs : 0),
+                tagDescription: (gGroup && gGroup.description) || 'Models within this group: Gemini 4 Neon, Gemini 4 Hydrogen, Orchestrator (Neon), Gemini 3.8 Flash',
                 supportsThinking: true
               }},
               {{
@@ -4407,20 +4692,20 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
                 resetWkTs: (cWk ? cWk.resetTs : defWkTs),
                 remaining5hPct: (c5h ? pctClaude5hInt : 0),
                 reset5hTs: (c5h ? c5h.resetTs : 0),
-                tagTitle: 'Thinking',
                 supportsThinking: true
               }}
             ];
           }}
         }}
 
-        // Strict display order: 1. Gemini 4 Argon, 2. Gemini 3.8 Flash, 3. Claude Models
+        // Strict display order: 1. Gemini 4 Ultra/Argon, 2. Gemini 3.8 Flash, 3. Claude Models
         modelsToRender.sort((a, b) => {{
           const getOrder = (m) => {{
             const id = (m.id || '').toLowerCase();
             const dn = (m.displayName || '').toLowerCase();
+            if (id === 'gemini-models' || id === 'gemini-models-ultra' || id.includes('carbon') || dn.includes('carbon')) return 1;
             if (id.includes('argon') || dn.includes('argon')) return 1;
-            if (id.includes('flash') || dn.includes('flash')) return 2;
+            if (id.includes('flash') || dn.includes('flash') || dn === 'gemini' || dn === 'gemini models') return 2;
             if (id.includes('claude') || dn.includes('claude') || dn.includes('opus') || dn.includes('sonnet')) return 3;
             return m.sortOrder || 99;
           }};
@@ -4491,9 +4776,8 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           const titleColor = isClaude ? 'var(--accent-purple)' : 'var(--accent-blue)';
 
           // Badges
-          const tagHtml = m.tagTitle ? `<span class="model-badge tag-${{m.tagTitle.toLowerCase()}}">${{m.tagTitle}}</span>` : '';
-          const thinkHtml = (m.supportsThinking && (!m.tagTitle || m.tagTitle.toLowerCase() !== 'thinking'))
-            ? `<span class="model-badge tag-thinking" title="Thinking">${{t('tagThinking') || '思考'}}</span>`
+          const tagHtml = (m.tagTitle && m.tagTitle.toLowerCase() !== 'thinking')
+            ? `<span class="model-badge tag-${{m.tagTitle.toLowerCase()}}">${{m.tagTitle}}</span>`
             : '';
 
           // 7D Quota is always rendered
@@ -4520,14 +4804,17 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
             capsulesHtml += renderCapsule(t('label5h') || '5H', h5Pct, h5Rts, isClaude, isWkExhausted);
           }}
 
+          const modelTitleTip = m.tagDescription && m.tagDescription !== m.displayName
+            ? `${{m.displayName}} — ${{m.tagDescription}}`
+            : m.displayName;
+
           blocksHtml += `
             <div class="model-quota-block">
               <div class="model-header">
                 <div class="model-name-group">
                   <span class="model-icon">${{icon}}</span>
-                  <span class="model-name" style="color:${{titleColor}}" title="${{m.displayName}}">${{m.displayName}}</span>
+                  <span class="model-name" style="color:${{titleColor}}" title="${{escAttr(modelTitleTip)}}">${{m.displayName}}</span>
                   ${{tagHtml}}
-                  ${{thinkHtml}}
                 </div>
               </div>
               <div class="model-capsules">
@@ -4543,17 +4830,23 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           </div>
         `;
 
+        const subObj = acc.subscription || {{}};
+        const isUltraAcc = (subObj.tier === 'ULTRA');
+        const tierBadgeHtml = renderTierBadge(subObj);
+        const dispEmail = formatEmail(acc.email);
+        const emailTip = emailMasked ? `${{dispEmail}} (${{t('emailMaskedTip')}})` : (acc.email || '');
         const card = document.createElement('div');
-        card.className = `account-card ${{isExhausted ? 'card-exhausted' : ''}}`;
+        card.className = `account-card ${{isExhausted ? 'card-exhausted' : (isUltraAcc ? 'card-ultra' : '')}}`;
         card.innerHTML = `
           <div class="acc-header">
             <div class="acc-title-area">
               <div class="acc-id-badge">${{acc.id}}</div>
               <div style="min-width:0;flex:1">
                 <div class="acc-name">${{acc.name}}</div>
-                <div class="acc-email" title="${{acc.email}}">${{acc.email}}</div>
+                <div class="acc-email" title="${{escAttr(emailTip)}}">${{escAttr(dispEmail)}}</div>
               </div>
             </div>
+            ${{tierBadgeHtml}}
           </div>
           ${{isAnomalyState ? `<div class="acc-status-row">
             <span class="status-tag ${{badgeClass}}" title="${{usability.reason || ''}}">${{statusLabel}}</span>
@@ -4860,7 +5153,10 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       const maxDay = chartDays.reduce((prev, curr) => (curr.total_tokens > prev.total_tokens ? curr : prev), {{ total_tokens: 0, date: '-' }});
 
       const MODEL_COLORS = {{
+        'Gemini 4 Neon': '#2dd4bf',
+        'Gemini 4 Carbon': '#22d3ee',
         'Gemini 4 Argon': '#38bdf8',
+        'Gemini 4 Hydrogen': '#818cf8',
         'Gemini 3.8 Flash': '#10b981',
         'Claude Models': '#c084fc',
         'Gemini Pro': '#f59e0b',
@@ -4876,7 +5172,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           }});
         }}
       }});
-      const canonicalOrder = ['Gemini 4 Argon', 'Gemini 3.8 Flash', 'Claude Models', 'Gemini Pro', 'GPT Models', 'Other'];
+      const canonicalOrder = ['Gemini 4 Neon', 'Gemini 4 Carbon', 'Gemini 4 Argon', 'Gemini 4 Hydrogen', 'Gemini 3.8 Flash', 'Claude Models', 'Gemini Pro', 'GPT Models', 'Other'];
       let activeModels = canonicalOrder.filter(m => activeModelsSet.has(m));
       activeModelsSet.forEach(m => {{
         if (!activeModels.includes(m)) activeModels.push(m);
@@ -5319,7 +5615,10 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           modelsHtml += `<div style="margin-top:0.35rem;padding-top:0.25rem;border-top:1px solid rgba(255,255,255,0.08)">`;
           modelsHtml += `<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:2px">${{t('modelDist') || '模型分布'}}:</div>`;
           const mColors = {{
+            'Gemini 4 Neon': '#2dd4bf',
+            'Gemini 4 Carbon': '#22d3ee',
             'Gemini 4 Argon': '#38bdf8',
+            'Gemini 4 Hydrogen': '#818cf8',
             'Gemini 3.8 Flash': '#10b981',
             'Claude Models': '#c084fc',
             'Gemini Pro': '#f59e0b',
@@ -5721,9 +6020,10 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
           <div>
             <div style="font-weight:700;color:#fff;display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
               <span style="${{!isEligible ? 'color:#94a3b8' : ''}}">[${{a.id}}] ${{a.name}}</span>
+              ${{renderTierBadge(a.subscription)}}
               ${{badgeHtml}}
             </div>
-            <div style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">${{a.email || '-'}}</div>
+            <div style="font-size:0.6875rem;color:var(--text-muted);margin-top:2px">${{escAttr(formatEmail(a.email))}}</div>
           </div>
           <div style="text-align:right;flex-shrink:0">
             <div style="font-size:0.75rem;font-weight:700;color:${{isEligible ? 'var(--accent-blue)' : 'var(--text-muted)'}}">${{t('labelWeekly') || '周'}}: ${{pctWk}}</div>
@@ -5902,7 +6202,7 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
       body.innerHTML = '';
       data.accounts.forEach(acc => {{
         const sub = acc.subscription || {{}};
-        const tier = sub.label || t('tierUnknown');
+        const tierBadge = renderTierBadge(sub) || `<span class="tier-badge tier-free">${{t('tierUnknown')}}</span>`;
         const restricted = !!(acc.region_restricted || (sub.ineligible || []).indexOf('UNSUPPORTED_LOCATION') >= 0);
         const code = (acc.usability || {{}}).code;
         const expInfo = (acc.token_expiry || (acc.auth || {{}}).expiry_info) || {{}};
@@ -5916,8 +6216,8 @@ def render_html_dashboard(usage_data: Dict[str, Any]) -> str:
         const checked = acc.show_on_dashboard !== false ? 'checked' : '';
         tr.innerHTML = `
           <td><strong>${{acc.name}}</strong> <span class="mono" style="color:var(--text-muted)">#${{acc.id}}</span></td>
-          <td class="mono" style="font-size:0.75rem">${{acc.email || '-'}}</td>
-          <td><span class="status-tag status-ready">${{tier}}</span></td>
+          <td class="mono" style="font-size:0.75rem">${{escAttr(formatEmail(acc.email))}}</td>
+          <td>${{tierBadge}}</td>
           <td>${{login}}</td>
           <td>${{restricted ? t('regionYes') : t('regionNo')}}</td>
           <td><input type="checkbox" ${{checked}} aria-label="${{acc.name}}" onchange="setDashboardVisibility('${{acc.name}}', this.checked)"></td>

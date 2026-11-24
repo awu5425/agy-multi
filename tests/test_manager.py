@@ -662,3 +662,83 @@ def test_login_profile_existing_credentials(tmp_path, monkeypatch):
     assert mgr.login_profile("2") is True
 
 
+def test_cmd_add_and_clone_auto_install_shortcuts(tmp_path):
+    import argparse
+    from agy_multi.cli import cmd_add, cmd_clone
+
+    mock_home = tmp_path / "home"
+    mock_home.mkdir()
+    base_dir = tmp_path / "profiles"
+    mgr = ProfileManager(base_dir=base_dir, real_home=mock_home)
+    local_bin = mock_home / ".local" / "bin"
+
+    # Simulate 99 existing profiles so next add lands on slot 100
+    for idx in range(1, 100):
+        mgr.add_profile(f"acc{idx}", f"acc{idx}@example.com")
+
+    add_args = argparse.Namespace(
+        name="hundredth",
+        email="acc100@example.com",
+        description="",
+        custom_id=None,
+        inherit=False,
+        inherit_from=None,
+        no_mcp=False,
+        no_skills=False,
+        no_plugins=False,
+        no_settings=False,
+        no_hooks=False,
+        copy=False,
+    )
+    assert cmd_add(mgr, add_args) == 0
+
+    assert (local_bin / "agy-100").is_file()
+    assert (local_bin / "agy-hundredth").is_file()
+    assert 'run "100"' in (local_bin / "agy-100").read_text(encoding="utf-8")
+    assert 'run "hundredth"' in (local_bin / "agy-hundredth").read_text(encoding="utf-8")
+
+    # Clone should also auto-generate shortcuts for slot 101
+    clone_args = argparse.Namespace(
+        source="100",
+        name="cloned101",
+        email="acc101@example.com",
+        description="",
+        custom_id=None,
+        no_mcp=False,
+        no_skills=False,
+        no_plugins=False,
+        no_settings=False,
+        no_hooks=False,
+        link=False,
+    )
+    assert cmd_clone(mgr, clone_args) == 0
+    assert (local_bin / "agy-101").is_file()
+    assert (local_bin / "agy-cloned101").is_file()
+
+    # Numeric IDs >= 1000 still sort numerically ahead of non-numeric custom IDs
+    mgr.add_profile("overflow", "overflow@example.com", custom_id="1000")
+    mgr.add_profile("auto", "auto@example.com", custom_id="custom")
+    ids = [p["id"] for p in mgr.list_profiles()]
+    assert ids[-2:] == ["1000", "custom"]
+
+    # Reserved name 'auto' must not overwrite agy-auto
+    add_reserved = argparse.Namespace(
+        name="safe102",
+        email="safe102@example.com",
+        description="",
+        custom_id=None,
+        inherit=False,
+        inherit_from=None,
+        no_mcp=False,
+        no_skills=False,
+        no_plugins=False,
+        no_settings=False,
+        no_hooks=False,
+        copy=False,
+    )
+    assert cmd_add(mgr, add_reserved) == 0
+    auto_content = (local_bin / "agy-auto").read_text(encoding="utf-8")
+    assert 'run "$@"' in auto_content
+
+
+

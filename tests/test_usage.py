@@ -264,16 +264,36 @@ def test_subscription_tier_and_dashboard_visibility():
     assert profile_on_dashboard({"region_restricted": True, "show_on_dashboard": True}) is True
     assert profile_on_dashboard({"show_on_dashboard": False}) is False
 
-    assert subscription_from_load_code_assist({
+    pro_sub = subscription_from_load_code_assist({
         "paidTier": {"id": "g1-pro-tier", "name": "Google AI Pro"},
         "currentTier": {"id": "free-tier"},
-    })["tier"] == "PRO"
+    })
+    assert pro_sub["tier"] == "PRO"
+    assert pro_sub["label"] == "Pro"
+    assert pro_sub["multiplier"] == "1x"
+
     assert subscription_from_load_code_assist({
         "currentTier": {"id": "free-tier", "name": "Antigravity Starter Quota"},
     })["tier"] == "FREE"
-    assert subscription_from_load_code_assist({
-        "paidTier": {"id": "g1-ultra-tier"},
-    })["tier"] == "ULTRA"
+
+    ultra_20x = subscription_from_load_code_assist({
+        "paidTier": {"id": "g1-ultra-tier", "name": "Google AI Ultra"},
+    })
+    assert ultra_20x["tier"] == "ULTRA"
+    assert ultra_20x["label"] == "Ultra 20x"
+    assert ultra_20x["multiplier"] == "20x"
+
+    ultra_5x = subscription_from_load_code_assist({
+        "paidTier": {
+            "id": "g1-ultra-lite-tier",
+            "name": "Google AI Ultra",
+            "upgradeSubscriptionText": "You can upgrade to a higher Google AI Ultra plan to receive the highest rate limits.",
+        },
+    })
+    assert ultra_5x["tier"] == "ULTRA"
+    assert ultra_5x["label"] == "Ultra 5x"
+    assert ultra_5x["multiplier"] == "5x"
+
     assert subscription_from_load_code_assist({})["tier"] == "FREE"
     assert subscription_from_load_code_assist(None)["tier"] is None
     blocked = subscription_from_load_code_assist({
@@ -537,8 +557,15 @@ def test_granular_model_quotas_render_and_groups_synthesis():
 def test_normalize_model_family():
     from agy_multi.usage import normalize_model_family
 
+    assert normalize_model_family("gemini-4-neon-high") == "Gemini 4 Neon"
+    assert normalize_model_family("gemini-4-neon-xhigh") == "Gemini 4 Neon"
+    assert normalize_model_family("gemini-pro-orchestrator-neon") == "Gemini 4 Neon"
+    assert normalize_model_family("gemini-4-carbon-high") == "Gemini 4 Carbon"
+    assert normalize_model_family("gemini-pro-orchestrator") == "Gemini 4 Carbon"
     assert normalize_model_family("gemini-4-argon") == "Gemini 4 Argon"
     assert normalize_model_family("gemini-4-argon-thinking") == "Gemini 4 Argon"
+    assert normalize_model_family("gemini-pro-orchestrator-g1-pro") == "Gemini 4 Argon"
+    assert normalize_model_family("gemini-4-hydrogen-high") == "Gemini 4 Hydrogen"
     assert normalize_model_family("gemini-3.8-flash-high") == "Gemini 3.8 Flash"
     assert normalize_model_family("gemini-3.8-flash") == "Gemini 3.8 Flash"
     assert normalize_model_family("claude-opus-5-5-high") == "Claude Models"
@@ -692,11 +719,11 @@ def test_argon_quota_extraction_and_weekly_exhaustion(tmp_path, monkeypatch):
     assert "claude-models-5-5" in models
 
     argon = models["gemini-4-argon"]
-    assert argon["has5h"] is True
+    assert argon["has5h"] is False
     assert argon["hasWeekly"] is True
-    assert argon["remaining5hPct"] == 94.1
+    assert argon["remaining5hPct"] is None
     assert argon["remainingWkPct"] == 100.0
-    assert argon["resetTime"] == "2026-10-30T04:35:29Z"
+    assert argon["resetTime"] == argon["resetWkTime"]
 
     flash = models["gemini-3.8-flash"]
     assert flash["has5h"] is True
@@ -938,10 +965,646 @@ def test_argon_dedicated_weekly_quota_bucket(tmp_path, monkeypatch):
     assert "gemini-4-argon" in models
     argon = models["gemini-4-argon"]
 
+    assert argon["has5h"] is False
+    assert argon["hasWeekly"] is True
+    assert argon["remaining5hPct"] is None
     assert argon["remainingWkPct"] == 12.5
-    assert argon["remaining5hPct"] == 99.5
     assert argon["remainingPct"] == 12.5
     assert argon["resetTime"] == "2026-11-14T08:46:18Z"
+
+
+def test_ultra_20x_and_5x_shared_pool_and_tier_badges(tmp_path, monkeypatch):
+    """
+    Verify that Ultra 20x (g1-ultra-tier) and Ultra 5x (g1-ultra-lite-tier) accounts:
+    1) Parse subscription multiplier/label accurately;
+    2) Produce 2 shared pool blocks ('Gemini' and Claude 4.6)
+       without synthesizing a fake res['groups']['argon'] group;
+    3) Render ULTRA 20x / ULTRA 5x / card-ultra and valid JS in HTML dashboard.
+    """
+    import json
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+    import urllib.request
+    from agy_multi.usage import fetch_official_quota, render_html_dashboard
+
+    class MockHTTPResponse:
+        def __init__(self, data_dict):
+            self._data = json.dumps(data_dict).encode("utf-8")
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    accounts_payload = []
+    for idx, (pname, tier_id, wk_frac, h5_frac) in enumerate([
+        ("ultra20", "g1-ultra-tier", 0.9554, 0.8462),
+        ("ultra5", "g1-ultra-lite-tier", 0.9900, 0.9799),
+    ], start=1):
+        pdir = tmp_path / pname
+        cli = pdir / ".gemini" / "antigravity-cli"
+        cli.mkdir(parents=True)
+        (cli / "antigravity-oauth-token").write_text(
+            json.dumps({
+                "token": {
+                    "access_token": f"ya29.test_{pname}",
+                    "refresh_token": "1//refresh",
+                    "expiry": "2099-01-01T00:00:00Z",
+                }
+            }),
+            encoding="utf-8",
+        )
+
+        def make_mock_urlopen(cur_tier_id, cur_wk, cur_h5):
+            def mock_urlopen(req, *args, **kwargs):
+                url = req.full_url
+                if "retrieveUserQuotaSummary" in url:
+                    return MockHTTPResponse({
+                        "groups": [
+                            {
+                                "displayName": "Gemini Models",
+                                "description": "Models within this group: Gemini 4 Neon, Gemini 4 Argon, Gemini 4 Hydrogen, Orchestrator (Neon), Orchestrator (Argon), Gemini 3.8 Flash",
+                                "buckets": [
+                                    {
+                                        "bucketId": "gemini-weekly",
+                                        "displayName": "Weekly Limit Remaining",
+                                        "window": "weekly",
+                                        "remainingFraction": cur_wk,
+                                        "resetTime": "2026-11-24T16:43:15Z",
+                                    },
+                                    {
+                                        "bucketId": "gemini-5h",
+                                        "displayName": "Five Hour Limit Remaining",
+                                        "window": "5h",
+                                        "remainingFraction": cur_h5,
+                                        "resetTime": "2026-11-17T21:43:15Z",
+                                    },
+                                ],
+                            },
+                            {
+                                "displayName": "Claude and GPT models",
+                                "description": "Models within this group: Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B",
+                                "buckets": [
+                                    {
+                                        "bucketId": "3p-weekly",
+                                        "displayName": "Weekly Limit Remaining",
+                                        "window": "weekly",
+                                        "remainingFraction": 1.0,
+                                        "resetTime": "2026-11-24T18:50:32Z",
+                                    },
+                                    {
+                                        "bucketId": "3p-5h",
+                                        "displayName": "Five Hour Limit Remaining",
+                                        "window": "5h",
+                                        "remainingFraction": 1.0,
+                                        "resetTime": "2026-11-17T23:50:32Z",
+                                    },
+                                ],
+                            },
+                        ]
+                    })
+                if "fetchAvailableModels" in url:
+                    return MockHTTPResponse({
+                        "models": {
+                            "gemini-3.8-flash-tiered": {
+                                "quotaInfo": {
+                                    "remainingFraction": cur_h5,
+                                    "resetTime": "2026-11-17T21:43:15Z",
+                                }
+                            },
+                            "claude-sonnet-4-6": {
+                                "displayName": "Claude Sonnet 4.6 (Thinking)",
+                                "quotaInfo": {
+                                    "remainingFraction": 1.0,
+                                    "resetTime": "2026-11-17T23:50:32Z",
+                                },
+                            },
+                        }
+                    })
+                if "loadCodeAssist" in url:
+                    return MockHTTPResponse({
+                        "paidTier": {"id": cur_tier_id, "name": "Google AI Ultra"},
+                        "currentTier": {"id": "free-tier"},
+                    })
+                return MockHTTPResponse({})
+
+            return mock_urlopen
+
+        monkeypatch.setattr(urllib.request, "urlopen", make_mock_urlopen(tier_id, wk_frac, h5_frac))
+        res = fetch_official_quota(pdir)
+        assert res["available"] is True
+        expected_label = "Ultra 20x" if tier_id == "g1-ultra-tier" else "Ultra 5x"
+        expected_mult = "20x" if tier_id == "g1-ultra-tier" else "5x"
+        assert res["subscription"]["tier"] == "ULTRA"
+        assert res["subscription"]["label"] == expected_label
+        assert res["subscription"]["multiplier"] == expected_mult
+
+        assert len(res["models"]) == 2
+        assert [m["id"] for m in res["models"]] == ["gemini-models", "claude-models-4-6"]
+        g_model = res["models"][0]
+        assert g_model["displayName"] == "Gemini"
+        assert g_model["remainingWkPct"] == round(wk_frac * 100, 1)
+        assert g_model["remaining5hPct"] == round(h5_frac * 100, 1)
+
+        assert "argon" not in res["groups"]
+
+        accounts_payload.append({
+            "id": str(idx),
+            "name": pname,
+            "email": f"{pname}@example.com",
+            "auth": {"is_valid": True},
+            "active_pids": [],
+            "subscription": res["subscription"],
+            "usability": {"code": "READY", "label": "● 可用", "is_usable": True},
+            "official_quota": res,
+            "stats_5h": {"requests": 0, "total_tokens": 0},
+            "stats_7d": {"requests": 0, "total_tokens": 0},
+            "stats_all": {"requests": 0, "total_tokens": 0},
+            "daily_stats": {},
+        })
+
+    html = render_html_dashboard({
+        "accounts": accounts_payload,
+        "totals": {"stats_5h": {}, "stats_7d": {}, "stats_all": {}},
+    })
+    assert "ULTRA 20x" in html
+    assert "ULTRA 5x" in html
+    assert "tier-ultra-20x" in html
+    assert "tier-ultra-5x" in html
+    assert "card-ultra" in html
+    assert '"id": "gemini-models"' in html
+    assert '"displayName": "Gemini"' in html
+    assert "Gemini Models (Neon / Argon / Flash)" not in html
+
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+    assert len(scripts) >= 1
+    node_bin = shutil.which("node")
+    if node_bin:
+        for script_content in scripts:
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as tf:
+                tf.write(script_content)
+                tf_path = tf.name
+            try:
+                chk = subprocess.run([node_bin, "--check", tf_path], capture_output=True, text=True)
+                assert chk.returncode == 0, f"Script syntax error:\n{chk.stderr}"
+            finally:
+                Path(tf_path).unlink(missing_ok=True)
+
+
+def test_pro_argon_vs_jio_without_argon(tmp_path, monkeypatch):
+    """
+    Verify that under g1-pro-tier:
+    - An account with a dedicated 'Gemini 4 Argon' quota group keeps label 'Pro'.
+    - An account without an Argon pool (Flash + Claude 4.6 only) gets label 'JIO' and variant 'JIO'.
+    - Dashboard HTML renders tier-pro / tier-jio / >PRO< / >JIO< and passes JS syntax check.
+    """
+    import json
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+    import urllib.request
+    from agy_multi.usage import fetch_official_quota, render_html_dashboard
+
+    class MockHTTPResponse:
+        def __init__(self, data_dict):
+            self._data = json.dumps(data_dict).encode("utf-8")
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    def make_pro_urlopen(with_argon: bool):
+        def mock_urlopen(req, *args, **kwargs):
+            url = req.full_url
+            if "retrieveUserQuotaSummary" in url:
+                groups = [
+                    {
+                        "displayName": "Gemini Models",
+                        "description": "Models within this group: Gemini 4 Hydrogen, Gemini 3.8 Flash" if with_argon else "Models within this group: Gemini 3.8 Flash",
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-weekly",
+                                "window": "weekly",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-11-24T18:50:26Z",
+                            },
+                            {
+                                "bucketId": "gemini-5h",
+                                "window": "5h",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-11-17T23:50:26Z",
+                            },
+                        ],
+                    },
+                    {
+                        "displayName": "Claude and GPT models",
+                        "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5" if with_argon else "Models within this group: Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B",
+                        "buckets": [
+                            {
+                                "bucketId": "3p-weekly",
+                                "window": "weekly",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-11-24T18:50:26Z",
+                            },
+                            {
+                                "bucketId": "3p-5h",
+                                "window": "5h",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-11-17T23:50:26Z",
+                            },
+                        ],
+                    },
+                ]
+                if with_argon:
+                    groups.append({
+                        "displayName": "Gemini 4 Argon",
+                        "description": "For paid Pro plans, Argon quota is separate.",
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-argon-wtu-weekly",
+                                "window": "weekly",
+                                "remainingFraction": 0.5,
+                                "resetTime": "2026-11-22T03:11:09Z",
+                            }
+                        ],
+                    })
+                return MockHTTPResponse({"groups": groups})
+            if "fetchAvailableModels" in url:
+                return MockHTTPResponse({"models": {}})
+            if "loadCodeAssist" in url:
+                return MockHTTPResponse({
+                    "paidTier": {"id": "g1-pro-tier", "name": "Google AI Pro"},
+                    "currentTier": {"id": "free-tier"},
+                })
+            return MockHTTPResponse({})
+
+        return mock_urlopen
+
+    accounts_payload = []
+    for idx, (pname, has_argon) in enumerate([("pro_argon", True), ("pro_jio", False)], start=1):
+        pdir = tmp_path / pname
+        cli = pdir / ".gemini" / "antigravity-cli"
+        cli.mkdir(parents=True)
+        (cli / "antigravity-oauth-token").write_text(
+            json.dumps({
+                "token": {
+                    "access_token": f"ya29.test_{pname}",
+                    "refresh_token": "1//refresh",
+                    "expiry": "2099-01-01T00:00:00Z",
+                }
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(urllib.request, "urlopen", make_pro_urlopen(has_argon))
+        res = fetch_official_quota(pdir)
+        assert res["available"] is True
+        assert res["subscription"]["tier"] == "PRO"
+        if has_argon:
+            assert res["subscription"]["label"] == "Pro"
+            assert res["subscription"].get("variant") is None
+            assert res["models"][0]["id"] == "gemini-4-argon"
+            assert res["models"][0]["has5h"] is False
+            assert res["models"][0]["remaining5hPct"] is None
+            assert res["models"][1]["displayName"] == "Gemini"
+        else:
+            assert res["subscription"]["label"] == "JIO"
+            assert res["subscription"].get("variant") == "JIO"
+            assert res["models"][0]["displayName"] == "Gemini 3.8 Flash"
+            assert res["models"][1]["tagTitle"] is None
+
+        accounts_payload.append({
+            "id": str(idx),
+            "name": pname,
+            "email": f"{pname}@example.com",
+            "auth": {"is_valid": True},
+            "active_pids": [],
+            "subscription": res["subscription"],
+            "usability": {"code": "READY", "label": "● 可用", "is_usable": True},
+            "official_quota": res,
+            "stats_5h": {"requests": 0, "total_tokens": 0},
+            "stats_7d": {"requests": 0, "total_tokens": 0},
+            "stats_all": {"requests": 0, "total_tokens": 0},
+            "daily_stats": {},
+        })
+
+    html = render_html_dashboard({
+        "accounts": accounts_payload,
+        "totals": {"stats_5h": {}, "stats_7d": {}, "stats_all": {}},
+    })
+    assert "tier-pro" in html
+    assert "tier-jio" in html
+    assert ">PRO<" in html
+    assert ">JIO<" in html
+    assert '"label": "JIO"' in html
+    assert '"variant": "JIO"' in html
+    assert '"label": "Pro"' in html
+    assert '<span class="model-badge tag-thinking' not in html
+    assert "thinkHtml" not in html
+
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+    assert len(scripts) >= 1
+    node_bin = shutil.which("node")
+    if node_bin:
+        for script_content in scripts:
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as tf:
+                tf.write(script_content)
+                tf_path = tf.name
+            try:
+                chk = subprocess.run([node_bin, "--check", tf_path], capture_output=True, text=True)
+                assert chk.returncode == 0, f"Script syntax error:\n{chk.stderr}"
+            finally:
+                Path(tf_path).unlink(missing_ok=True)
+
+
+def test_dashboard_email_masking_toggle():
+    """Verify one-click email masking button, JS syntax, and maskEmailStr redaction output."""
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+    from agy_multi.usage import render_html_dashboard
+
+    html = render_html_dashboard({
+        "accounts": [
+            {
+                "id": "1",
+                "name": "tester",
+                "email": "alice@example.com",
+                "auth": {"is_valid": True},
+                "active_pids": [],
+                "usability": {"code": "READY", "label": "● 可用", "is_usable": True},
+                "stats_5h": {"requests": 0, "total_tokens": 0},
+                "stats_7d": {"requests": 0, "total_tokens": 0},
+                "stats_all": {"requests": 0, "total_tokens": 0},
+                "daily_stats": {},
+            }
+        ],
+        "totals": {"stats_5h": {}, "stats_7d": {}, "stats_all": {}},
+    })
+
+    for token in (
+        'id="mask-email-btn"',
+        "toggleEmailMask",
+        "maskEmailStr",
+        "formatEmail",
+        "btn-active-mask",
+    ):
+        assert token in html
+
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+    assert len(scripts) >= 1
+    node_bin = shutil.which("node")
+    if node_bin:
+        for script_content in scripts:
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as tf:
+                tf.write(script_content)
+                tf_path = tf.name
+            try:
+                chk = subprocess.run([node_bin, "--check", tf_path], capture_output=True, text=True)
+                assert chk.returncode == 0, f"Script syntax error:\n{chk.stderr}"
+            finally:
+                Path(tf_path).unlink(missing_ok=True)
+
+        m = re.search(r"function maskEmailStr\(raw\)\s*\{.*?\n    \}", scripts[0], re.DOTALL)
+        assert m, "maskEmailStr helper not found in dashboard script"
+        js_eval = (
+            m.group(0)
+            + "\nconst assert = require('assert');"
+            + "\nassert.strictEqual(maskEmailStr('alice@example.com'), 'al****@e***.com');"
+            + "\nassert.strictEqual(maskEmailStr('ab@test.org'), 'a****@t***.org');"
+            + "\nassert.strictEqual(maskEmailStr('-'), '-');"
+        )
+        res = subprocess.run([node_bin, "-e", js_eval], capture_output=True, text=True)
+        assert res.returncode == 0, f"maskEmailStr runtime check failed:\n{res.stderr}"
+
+
+def test_pro_shared_gemini_pool_with_carbon_and_argon(tmp_path, monkeypatch):
+    """
+    Verify Pro accounts on the merged 2-pool layout (Gemini 4 Neon/Carbon/Argon/Hydrogen + Flash
+    in one Gemini pool, Claude 5.5 in the second pool, and no separate argon group):
+    1) Remain tier PRO (label 'Pro', not misclassified as JIO);
+    2) Emit ['gemini-models', 'claude-models-5-5'] with displayName 'Gemini';
+    3) Do not synthesize a fake 'argon' group;
+    4) Render 'Gemini' cleanly in HTML dashboard without old parenthesized titles.
+    """
+    import json
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+    import urllib.request
+    from agy_multi.usage import fetch_official_quota, render_html_dashboard
+
+    class MockHTTPResponse:
+        def __init__(self, data_dict):
+            self._data = json.dumps(data_dict).encode("utf-8")
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    pdir = tmp_path / "pro_merged"
+    cli = pdir / ".gemini" / "antigravity-cli"
+    cli.mkdir(parents=True)
+    (cli / "antigravity-oauth-token").write_text(
+        json.dumps({
+            "token": {
+                "access_token": "ya29.test_pro_merged",
+                "refresh_token": "1//refresh",
+                "expiry": "2099-01-01T00:00:00Z",
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    def mock_urlopen(req, *args, **kwargs):
+        url = req.full_url
+        if "retrieveUserQuotaSummary" in url:
+            return MockHTTPResponse({
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "description": (
+                            "Models within this group: Gemini 4 Neon, Gemini 4 Carbon, "
+                            "Gemini 4 Argon, Gemini 4 Hydrogen, Orchestrator (Neon), "
+                            "Orchestrator (Carbon), Orchestrator (Argon), Gemini 3.8 Flash"
+                        ),
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-weekly",
+                                "window": "weekly",
+                                "remainingFraction": 0.96,
+                                "resetTime": "2026-12-01T03:23:54Z",
+                            },
+                            {
+                                "bucketId": "gemini-5h",
+                                "window": "5h",
+                                "remainingFraction": 0.92,
+                                "resetTime": "2026-11-24T08:23:54Z",
+                            },
+                        ],
+                    },
+                    {
+                        "displayName": "Claude and GPT models",
+                        "description": "Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B",
+                        "buckets": [
+                            {
+                                "bucketId": "3p-weekly",
+                                "window": "weekly",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-12-01T03:24:27Z",
+                            },
+                            {
+                                "bucketId": "3p-5h",
+                                "window": "5h",
+                                "remainingFraction": 1.0,
+                                "resetTime": "2026-11-24T08:24:27Z",
+                            },
+                        ],
+                    },
+                ]
+            })
+        if "fetchAvailableModels" in url:
+            return MockHTTPResponse({
+                "models": {
+                    "gemini-3.8-flash-tiered": {
+                        "quotaInfo": {"remainingFraction": 0.92, "resetTime": "2026-11-24T08:23:54Z"}
+                    },
+                    "gemini-4-hydrogen-sonar": {
+                        "quotaInfo": {"remainingFraction": 0.92, "resetTime": "2026-11-24T08:23:54Z"}
+                    },
+                    "claude-opus-5-5-high": {
+                        "displayName": "Claude Opus 5.5 (High)",
+                        "quotaInfo": {"remainingFraction": 1.0, "resetTime": "2026-11-24T08:24:27Z"},
+                    },
+                }
+            })
+        if "loadCodeAssist" in url:
+            return MockHTTPResponse({
+                "paidTier": {"id": "g1-pro-tier", "name": "Google AI Pro"},
+                "currentTier": {"id": "free-tier"},
+            })
+        return MockHTTPResponse({})
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+    res = fetch_official_quota(pdir)
+    assert res["available"] is True
+    assert res["subscription"]["tier"] == "PRO"
+    assert res["subscription"]["label"] == "Pro"
+    assert res["subscription"].get("variant") is None
+    assert [m["id"] for m in res["models"]] == ["gemini-models", "claude-models-5-5"]
+    assert res["models"][0]["displayName"] == "Gemini"
+    assert res["models"][0]["remaining5hPct"] == 92.0
+    assert res["models"][0]["remainingWkPct"] == 96.0
+    assert "argon" not in res["groups"]
+
+    html = render_html_dashboard({
+        "accounts": [{
+            "id": "1",
+            "name": "pro_merged",
+            "email": "pro@example.com",
+            "auth": {"is_valid": True},
+            "active_pids": [],
+            "subscription": res["subscription"],
+            "usability": {"code": "READY", "label": "● 可用", "is_usable": True},
+            "official_quota": res,
+            "stats_5h": {"requests": 0, "total_tokens": 0},
+            "stats_7d": {"requests": 0, "total_tokens": 0},
+            "stats_all": {"requests": 0, "total_tokens": 0},
+            "daily_stats": {},
+        }],
+        "totals": {"stats_5h": {}, "stats_7d": {}, "stats_all": {}},
+    })
+    assert '"id": "gemini-models"' in html
+    assert '"displayName": "Gemini"' in html
+    assert "Gemini Models (Neon / Argon / Flash)" not in html
+
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+    assert len(scripts) >= 1
+    node_bin = shutil.which("node")
+    if node_bin:
+        for script_content in scripts:
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as tf:
+                tf.write(script_content)
+                tf_path = tf.name
+            try:
+                chk = subprocess.run([node_bin, "--check", tf_path], capture_output=True, text=True)
+                assert chk.returncode == 0, f"Script syntax error:\n{chk.stderr}"
+            finally:
+                Path(tf_path).unlink(missing_ok=True)
+
+
+def test_cmd_usage_hides_argon_column_when_merged(tmp_path, monkeypatch, capsys):
+    """Verify cmd_usage omits 'Argon Wk Rem' when no account has a separate argon bucket."""
+    import argparse
+    from agy_multi.cli import cmd_usage
+    from agy_multi.manager import ProfileManager
+    import agy_multi.usage as usage_mod
+
+    monkeypatch.setattr(ProfileManager, "_detect_real_home", lambda self: tmp_path)
+    mgr = ProfileManager()
+    args = argparse.Namespace(json=False, csv=False, html=None, models=False)
+    monkeypatch.setattr(usage_mod, "save_html_dashboard", lambda _mgr: tmp_path / "dash.html")
+
+    base_acc = {
+        "id": "1",
+        "name": "panya",
+        "usability": {"code": "READY", "label": "● 可用"},
+        "stats_5h": {"total_tokens": 100},
+        "stats_7d": {"total_tokens": 500},
+        "active_pids": [],
+        "official_quota": {
+            "available": True,
+            "groups": {
+                "gemini": {"buckets": {"gemini-5h": {"remainingPct": 95.0}, "gemini-weekly": {"remainingPct": 99.0}}},
+                "claude_gpt": {"buckets": {"3p-weekly": {"remainingPct": 100.0}}},
+            },
+            "models": [],
+        },
+    }
+    totals_stub = {
+        "stats_5h": {"total_tokens": 100, "requests": 1, "thinking_tokens": 0},
+        "stats_7d": {"total_tokens": 500, "requests": 5, "thinking_tokens": 0},
+        "stats_all": {"total_tokens": 1000, "requests": 10, "thinking_tokens": 0},
+    }
+    monkeypatch.setattr(usage_mod, "get_all_usage", lambda _mgr: {"accounts": [base_acc], "totals": totals_stub})
+    assert cmd_usage(mgr, args) == 0
+    out_merged = capsys.readouterr().out
+    assert "Argon Wk Rem" not in out_merged
+
+    acc_with_argon = {
+        **base_acc,
+        "official_quota": {
+            **base_acc["official_quota"],
+            "groups": {
+                **base_acc["official_quota"]["groups"],
+                "argon": {"buckets": {"gemini-argon-wtu-weekly": {"remainingPct": 50.0}}},
+            },
+        },
+    }
+    monkeypatch.setattr(usage_mod, "get_all_usage", lambda _mgr: {"accounts": [acc_with_argon], "totals": totals_stub})
+    assert cmd_usage(mgr, args) == 0
+    out_argon = capsys.readouterr().out
+    assert "Argon Wk Rem" in out_argon
+
+
 
 
 
